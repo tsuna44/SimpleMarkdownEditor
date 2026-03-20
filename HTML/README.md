@@ -1,4 +1,4 @@
-# SimpleMarkDownEditor
+# SimpleMarkdownEditor
 
 ブラウザで動作する、Mermaid ダイアグラムのインラインレンダリングに対応した Markdown エディタです。
 
@@ -8,7 +8,7 @@
 - **Mermaid ダイアグラム** — コードブロックに `mermaid` を指定するだけで図をレンダリング。SVG コピー・別タブ(PNG)保存に対応
 - **シンタックスハイライト** — highlight.js によるコードブロックの色付け
 - **ライト / ダークテーマ** — ワンクリックで切り替え
-- **オフライン対応** — `libs/` フォルダにライブラリを配置すれば CDN なしで動作。スタンドアロン版 (`standalone.html`) は単一ファイルで完結
+- **オフライン対応** — `libs/` フォルダにライブラリを配置すれば CDN なしで動作。スタンドアロン版 (`standalone_SimpleMarkdownEditor.html`) は単一ファイルで完結
 - **検索・置換** — 正規表現・大文字小文字区別オプション付き (`Ctrl+F`)
 - **ドラッグでペイン幅を調整** — エディタとプレビューの境界をドラッグしてリサイズ可能
 - **ステータスバー** — 文字数 / 行数 / 単語数 / カーソル位置をリアルタイム表示
@@ -38,13 +38,13 @@
 ```
 HTML/
 ├── index.html       # メインエディタ（CDN / オフライン自動切替）
-├── standalone.html  # 全ライブラリ同梱のスタンドアロン版
-└── build.py         # standalone.html を生成するビルドスクリプト
+├── standalone_SimpleMarkdownEditor.html  # 全ライブラリ同梱のスタンドアロン版
+└── build.py         # standalone_SimpleMarkdownEditor.html を生成するビルドスクリプト
 ```
 
 ## 使い方
 
-`index.html` をブラウザで開くだけで動作します。インターネット接続がない環境では、`standalone.html` を使用してください。
+`index.html` をブラウザで開くだけで動作します。インターネット接続がない環境では、`standalone_SimpleMarkdownEditor.html` を使用してください。
 
 ## ライセンス
 
