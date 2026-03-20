@@ -10,7 +10,7 @@ build.py — Markdown Editor スタンドアロン版ビルドスクリプト
     - インターネット接続（初回ダウンロード時のみ）
 
 出力:
-    standalone.html  ←  これ1ファイルで完全動作（外部通信ゼロ）
+    standalone_SimpleMarkDownEditor.html  ←  これ1ファイルで完全動作（外部通信ゼロ）
 """
 
 import sys, os, urllib.request, gzip, json, re
@@ -700,13 +700,13 @@ console.log(greet("World"));
         html = html.replace(f"%%{tag}%%", downloaded[tag])
 
     # ── 出力 ────────────────────────────────────────────────────────
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone.html")
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone_SimpleMarkDownEditor.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
 
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     print(f"\n{'='*56}")
-    print(f"  ✅ 完成: standalone.html  ({size_mb:.1f} MB)")
+    print(f"  ✅ 完成: standalone_SimpleMarkDownEditor.html  ({size_mb:.1f} MB)")
     print(f"{'='*56}")
     print(f"\n  このファイル1つをどのPCにコピーしても")
     print(f"  インターネット不要で完全動作します。\n")
