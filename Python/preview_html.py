@@ -60,19 +60,28 @@ def _shell_html(theme: dict, dark: bool) -> str:
   tr:nth-child(even) td {{ background:{t['surface2']}; }}
   img {{ max-width:100%; border-radius:6px; }}
   hr {{ border:none; border-top:1px solid {t['border']}; margin:1.5em 0; }}
-  /* mermaid diagrams */
-  .mermaid {{
+  /* mermaid / plantuml diagrams */
+  .mermaid, .plantuml {{
     position: relative; text-align: center; margin: 1em 0;
     padding: 16px 16px 44px;
     background: {t['surface2']}; border: 1px solid {t['border']}; border-radius: 6px;
     overflow-x: auto;
   }}
+  .plantuml svg {{ max-width: 100%; height: auto; }}
+  .plantuml-error {{
+    margin: 1em 0; padding: 12px 16px;
+    background: {"#3a1515" if dark else "#fff0f0"};
+    border: 1px solid {"#7a2020" if dark else "#f0a0a0"};
+    border-radius: 6px; color: {"#f08080" if dark else "#c00"};
+    font-size: .9em;
+  }}
+  .plantuml-error code {{ background: transparent; color: inherit; }}
   .diagram-actions {{
     position: absolute; bottom: 8px; right: 8px;
     display: flex; gap: 6px;
     opacity: 0; transition: opacity .2s;
   }}
-  .mermaid:hover .diagram-actions {{ opacity: 1; }}
+  .mermaid:hover .diagram-actions, .plantuml:hover .diagram-actions {{ opacity: 1; }}
   .diagram-btn {{
     padding: 3px 10px; font-size: 11px; cursor: pointer;
     border: 1px solid {t['border']}; border-radius: 4px;

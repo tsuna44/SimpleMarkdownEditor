@@ -79,9 +79,9 @@ PYINSTALLER_ARGS=(
   --windowed
   --collect-all markdown
   --collect-all pygments
-  --hidden-import PyQt6.QtWebEngineWidgets
-  --hidden-import PyQt6.QtWebEngineCore
-  --hidden-import PyQt6.QtWebEngineQuick
+  --hidden-import PySide6.QtWebEngineWidgets
+  --hidden-import PySide6.QtWebEngineCore
+  --hidden-import PySide6.QtWebEngineQuick
 )
 
 if $ONEFILE; then

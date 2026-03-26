@@ -2,9 +2,9 @@
 CodeEditor widget with line-number gutter for Simple Markdown Editor.
 """
 
-from PyQt6.QtWidgets import QWidget, QPlainTextEdit
-from PyQt6.QtCore import Qt, QSize, QRect
-from PyQt6.QtGui import QFont, QPainter, QColor, QPalette
+from PySide6.QtWidgets import QWidget, QPlainTextEdit
+from PySide6.QtCore import Qt, QSize, QRect
+from PySide6.QtGui import QFont, QPainter, QColor, QPalette
 
 from themes import DARK, LIGHT
 

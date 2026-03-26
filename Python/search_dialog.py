@@ -2,11 +2,11 @@
 Search & Replace dialog for Simple Markdown Editor.
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QCheckBox, QLabel,
 )
-from PyQt6.QtGui import QTextCursor, QTextDocument
+from PySide6.QtGui import QTextCursor, QTextDocument
 
 from editor_widget import CodeEditor
 
@@ -75,7 +75,7 @@ class SearchDialog(QDialog):
         return flags
 
     def _search(self):
-        from PyQt6.QtCore import QRegularExpression
+        from PySide6.QtCore import QRegularExpression
         pattern = self.search_edit.text()
         self._matches = []
         self._cur = -1
