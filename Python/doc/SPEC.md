@@ -3,7 +3,7 @@
 ## 概要
 
 Python と PySide6 (Qt6) で実装されたデスクトップ向け Markdown エディタ。
-左ペインでテキスト編集、右ペインでリアルタイムプレビューを表示する分割レイアウト。
+タブ形式で複数ファイルを同時に開くことができ、左ペインでテキスト編集、右ペインでリアルタイムプレビューを表示する分割レイアウト。
 
 ---
 
@@ -12,13 +12,14 @@ Python と PySide6 (Qt6) で実装されたデスクトップ向け Markdown エ
 | 項目 | 要件 |
 |---|---|
 | Python | 3.10 以上 |
-| 主要依存ライブラリ | PySide6 >= 6.6、markdown >= 3.5、pygments >= 2.17 |
+| 主要依存ライブラリ | PySide6 >=6.10, <6.11、markdown >= 3.5、pygments >= 2.17 |
+| Java | 17 以上（PlantUML 機能を使う場合のみ） |
 | ライセンス | MIT（依存ライブラリは LGPL/BSD） |
 
 インストール:
 
 ```bash
-pip install PySide6 markdown pygments
+pip install -r requirements.txt
 ```
 
 起動:
@@ -36,6 +37,8 @@ python markdown_editor.py [file.md]
 │  [File ▾]  ☀  🔍  A−  14px  A+     file.md │  ← ツールバー 1段目
 ├─────────────────────────────────────────────┤
 │ H1 H2 H3 | B I ~~ ` | • 1. > ``` Mermaid … │  ← ツールバー 2段目
+├──────────────────────────────────────────[+]│  ← タブバー
+│ untitled.md ×  | file.md ×  |               │
 ├──────────────────┬──────────────────────────┤
 │  EDITOR          │  PREVIEW                 │
 │                  │                          │
@@ -95,6 +98,8 @@ python markdown_editor.py [file.md]
 | リンク | `[text](url)` |
 | 画像 | `![alt](url)` |
 | 脚注 | `[^1]` 形式（markdown.extensions.extra） |
+| Mermaid ダイアグラム | ```` ```mermaid ```` ブロック（CDN 経由でレンダリング） |
+| PlantUML ダイアグラム | ```` ```plantuml ```` ブロック（ローカル Java で SVG 生成） |
 
 #### 2-3. シンタックスハイライト
 
@@ -117,29 +122,63 @@ python markdown_editor.py [file.md]
 | 📋 Copy PNG | SVG を 2× 解像度（Retina 対応）の PNG に変換しクリップボードにコピー |
 | ⬇ SVG | SVG ファイルとしてダウンロード（保存ダイアログ表示） |
 
+#### 2-5. PlantUML ダイアグラム
+
+- ```` ```plantuml ```` ブロックを検出し、ローカルの PlantUML を使って SVG に変換
+- `@startuml` / `@enduml` ヘッダが省略されている場合は自動補完
+- レンダリング結果を最大 50 件キャッシュ（FIFO で古いものから破棄）
+
+**PlantUML コマンド自動検出（優先順位順）:**
+
+| 優先度 | 検出パス |
+|---|---|
+| 1 | `plantuml` (PATH) |
+| 2 | `plantuml.sh` (PATH) |
+| 3 | `Python/plantuml.jar`（同梱 jar） |
+| 4 | Homebrew OpenJDK + 同梱 jar |
+| 5 | システム java + Homebrew/apt/標準パスの plantuml.jar |
+
+PlantUML が見つからない場合はエラーメッセージをプレビューに表示。
+
 ---
 
 ### 3. ファイル操作
 
 | 操作 | ショートカット | 詳細 |
 |---|---|---|
-| 新規 | Ctrl+N | 未保存確認ダイアログあり |
-| 開く | Ctrl+O | フィルタ: `.md` `.markdown` `.txt` |
+| 新規タブ | Ctrl+T | 空の untitled.md タブを追加 |
+| 新規（現タブ） | Ctrl+N | 現在のタブを新規ファイル状態にリセット（未保存確認あり） |
+| 開く | Ctrl+O | 複数選択可。空タブがあれば再利用、なければ新規タブで開く |
 | 上書き保存 | Ctrl+S | 未保存時は「名前を付けて保存」にフォールバック |
 | 名前を付けて保存 | — | フィルタ: `.md` `.markdown` `.txt` |
-| PDF エクスポート | Ctrl+Shift+E | A4 / 縦向き / 余白 15mm、WebEngine の印刷機能を使用 |
+| タブを閉じる | Ctrl+W | 未保存確認あり。最後の 1 タブは閉じず空タブにリセット |
+| PDF エクスポート | Ctrl+Shift+E | A4 / 縦向き / 余白 15mm、`printToPdf()` を使用 |
 
 **未保存確認ダイアログ**:
-新規作成・ファイルを開く・ウィンドウを閉じる際に、未保存の変更がある場合は「保存 / 破棄 / キャンセル」を提示。
+新規作成・ファイルを開く・タブを閉じる・ウィンドウを閉じる際に、未保存の変更がある場合は「保存 / 破棄 / キャンセル」を提示。
 
 **ウィンドウタイトル**:
-`Markdown Editor — {ファイル名}` / 未保存変更がある場合は末尾に ` ●` を付加。
+`Markdown Editor — {ファイル名}` / 未保存変更がある場合はファイル名末尾に ` ●` を付加。
 
 ---
 
-### 4. テーマ
+### 4. タブ管理
 
-#### 4-1. ライトテーマ / ダークテーマ
+| 操作 | 方法 |
+|---|---|
+| 新規タブ | Ctrl+T またはタブバー右端の `+` ボタン |
+| タブを閉じる | Ctrl+W またはタブ右端の `×` ボタン |
+| タブの並び替え | ドラッグ＆ドロップ |
+| タブ切り替え | クリック |
+
+- タブが 0 になると自動的に空の untitled.md タブを生成（常に 1 タブ以上を維持）
+- ファイルを開く際、現在のタブが空かつ未変更の場合は新規タブを作らず再利用
+
+---
+
+### 5. テーマ
+
+#### 5-1. ライトテーマ / ダークテーマ
 
 ツールバーの ☀ / 🌙 ボタンで切り替え（再起動不要）。
 
@@ -158,7 +197,7 @@ python markdown_editor.py [file.md]
 
 ---
 
-### 5. フォントサイズ変更
+### 6. フォントサイズ変更
 
 ツールバーの `A−` / `A+` で変更（範囲: 8〜32 px）。
 
@@ -172,9 +211,9 @@ python markdown_editor.py [file.md]
 
 ---
 
-### 6. 検索・置換ダイアログ
+### 7. 検索・置換ダイアログ
 
-ショートカット: `Ctrl+F`（モードレスダイアログ）
+ショートカット: `Ctrl+F`（モードレスダイアログ、開くと検索フィールドを自動選択）
 
 | 機能 | 詳細 |
 |---|---|
@@ -187,7 +226,7 @@ python markdown_editor.py [file.md]
 
 ---
 
-### 7. 編集ツールバー（クイック挿入）
+### 8. 編集ツールバー（クイック挿入）
 
 | ボタン | 挿入内容 | ショートカット |
 |---|---|---|
@@ -201,6 +240,7 @@ python markdown_editor.py [file.md]
 | > Quote | `> ` を行頭に挿入 | — |
 | ``` Code | ```` ```\ncode\n``` ```` | — |
 | Mermaid | Mermaid サンプルブロック挿入 | — |
+| PlantUML | PlantUML サンプルブロック挿入 | — |
 | Table | 3列テーブルのテンプレート挿入 | — |
 | Link | `[テキスト](url)` | Ctrl+K |
 | --- | `\n---\n` | — |
@@ -209,7 +249,7 @@ python markdown_editor.py [file.md]
 
 ---
 
-### 8. ステータスバー
+### 9. ステータスバー
 
 | 表示項目 | 内容 |
 |---|---|
@@ -224,15 +264,20 @@ python markdown_editor.py [file.md]
 
 ```
 Python/
-├── markdown_editor.py   # エントリポイント、QApplication 起動
-├── main_window.py       # メインウィンドウ（MarkdownEditor クラス）
-├── editor_widget.py     # 行番号付きエディタ（CodeEditor クラス）
-├── search_dialog.py     # 検索・置換ダイアログ（SearchDialog クラス）
-├── preview_html.py      # プレビュー用シェル HTML 生成
-├── themes.py            # ライト / ダークテーマのカラー定義
-├── requirements.txt     # 依存パッケージ一覧
-├── build.sh             # macOS / Linux 向け PyInstaller ビルドスクリプト
-└── build_windows.bat    # Windows 向け PyInstaller ビルドスクリプト
+├── doc/
+│   ├── SPEC.md            # 本ドキュメント
+│   ├── SETUP.md           # セットアップ手順書
+│   └── DISTRIBUTION.md    # 配布・ライセンスガイド
+├── markdown_editor.py     # エントリポイント、QApplication 起動
+├── main_window.py         # メインウィンドウ（MarkdownEditor / EditorTab クラス）
+├── editor_widget.py       # 行番号付きエディタ（CodeEditor クラス）
+├── search_dialog.py       # 検索・置換ダイアログ（SearchDialog クラス）
+├── preview_html.py        # プレビュー用シェル HTML 生成
+├── themes.py              # ライト / ダークテーマのカラー定義
+├── requirements.txt       # 依存パッケージ一覧
+├── plantuml.jar           # PlantUML 本体（git 管理外・別途配置）
+├── build.sh               # macOS / Linux 向け PyInstaller ビルドスクリプト
+└── build_windows.bat      # Windows 向け PyInstaller ビルドスクリプト
 ```
 
 ---
@@ -241,15 +286,16 @@ Python/
 
 ```bash
 # macOS / Linux
-bash build.sh             # dist/SimpleMarkdownEditor.app
-bash build.sh --onefile   # 単一バイナリ
+bash build.sh             # --onedir ビルド（LGPL 準拠、デフォルト）
+bash build.sh --clean     # クリーンビルド
 
 # Windows
 build_windows.bat
-build_windows.bat --onefile
+build_windows.bat --clean
 ```
 
-> **注意:** ビルドには PyInstaller を使用します。PyInstaller は GPL v2 ライセンスであるため、バイナリ配布時のライセンス適合性を事前に確認してください。
+> `--onefile` は PySide6 の LGPL ライセンス要件を満たせない可能性があります。
+> 詳細は [DISTRIBUTION.md](DISTRIBUTION.md) を参照してください。
 
 ---
 
@@ -257,7 +303,8 @@ build_windows.bat --onefile
 
 | 項目 | 内容 |
 |---|---|
-| オフライン時の Mermaid | CDN から mermaid.js を読み込むためオフライン環境では図が表示されない |
-| XSS | `marked.parse()` 相当の変換結果を `innerHTML` に直接挿入しており、DOMPurify 等のサニタイズは未実装 |
-| PDF 出力 | WebEngine の印刷機能を使用するため、Mermaid 図のレンダリング完了前に PDF 生成すると図が欠けることがある |
-| LGPL + PyInstaller | `--onefile` ビルドは PySide6 の静的バンドルとみなされる可能性があり、LGPL の再リンク条件を満たすか確認が必要 |
+| Mermaid バージョン | `vendor/mermaid.min.js` を差し替えることでバージョン変更可。CDN フォールバックあり |
+| PlantUML の依存 | Java と PlantUML が未インストールの場合、PlantUML ブロックはエラー表示になる |
+| XSS | Markdown の変換結果を `innerHTML` に直接挿入しており、DOMPurify 等のサニタイズは未実装 |
+| PDF 出力 | Mermaid / PlantUML 図のレンダリング完了前に PDF 生成すると図が欠けることがある |
+| LGPL + PyInstaller | `--onefile` ビルドは PySide6 の静的バンドルとみなされる可能性あり。`--onedir` を使用すること |

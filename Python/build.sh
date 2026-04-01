@@ -82,6 +82,7 @@ PYINSTALLER_ARGS=(
   --hidden-import PySide6.QtWebEngineWidgets
   --hidden-import PySide6.QtWebEngineCore
   --hidden-import PySide6.QtWebEngineQuick
+  --add-data "vendor:vendor"
 )
 
 if $ONEFILE; then

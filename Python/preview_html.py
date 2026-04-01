@@ -3,7 +3,33 @@ Preview shell HTML generator for Simple Markdown Editor.
 Generates a static page loaded once per theme; content is updated via innerHTML.
 """
 
+import sys
+from functools import lru_cache
+from pathlib import Path
+
 from pygments.formatters import HtmlFormatter
+
+
+def _vendor_dir() -> Path:
+    """Vendor directory — works both in dev and PyInstaller (sys._MEIPASS) builds."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "vendor"  # type: ignore[attr-defined]
+    return Path(__file__).parent / "vendor"
+
+
+@lru_cache(maxsize=1)
+def _mermaid_script_tag() -> str:
+    """Return a <script> tag for mermaid.js.
+
+    Prefers the local vendor file for offline use.
+    Falls back to the CDN if the vendor file is missing.
+    The result is cached so the 3 MB file is read only once per process.
+    """
+    path = _vendor_dir() / "mermaid.min.js"
+    if path.exists():
+        js = path.read_text(encoding="utf-8")
+        return f"<script>{js}</script>"
+    return '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
 
 
 def _shell_html(theme: dict, dark: bool) -> str:
@@ -98,7 +124,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
   /* Pygments */
   {pygments_css}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+{_mermaid_script_tag()}
 <script>
   const _mermaidTheme = '{"dark" if dark else "default"}';
   const BASE_FONT_SIZE = 14;
