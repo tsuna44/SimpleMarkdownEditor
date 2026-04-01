@@ -83,6 +83,7 @@ PYINSTALLER_ARGS=(
   --hidden-import PySide6.QtWebEngineCore
   --hidden-import PySide6.QtWebEngineQuick
   --add-data "vendor:vendor"
+  --add-data "plantuml.jar:."
 )
 
 if $ONEFILE; then

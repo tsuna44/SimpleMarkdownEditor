@@ -6,7 +6,7 @@
 
 | 項目 | 値 |
 |---|---|
-| バージョン | 10.9.5 |
+| バージョン | 11.13.0 |
 | 取得元 | https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js |
 | 最新版確認 | https://www.npmjs.com/package/mermaid |
 

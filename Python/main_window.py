@@ -4,6 +4,7 @@ Main window (MarkdownEditor) for Simple Markdown Editor.
 
 import os
 import re
+import sys
 import json
 import shutil
 import subprocess
@@ -14,18 +15,30 @@ import markdown
 
 # ── PlantUML command detection ───────────────────────────────────────────────
 
-_PUML_CANDIDATES: list[list[str]] = [
-    ["plantuml"],
-    ["plantuml.sh"],
-    ["java", "-jar", str(Path(__file__).parent / "plantuml.jar")],
-    ["/opt/homebrew/opt/openjdk/bin/java", "-jar", str(Path(__file__).parent / "plantuml.jar")],
-    ["/usr/local/opt/openjdk/bin/java",    "-jar", str(Path(__file__).parent / "plantuml.jar")],
-    ["java", "-jar", "/usr/local/opt/plantuml/libexec/plantuml.jar"],
-    ["java", "-jar", "/opt/homebrew/opt/plantuml/libexec/plantuml.jar"],
-    ["java", "-jar", "/usr/share/plantuml/plantuml.jar"],
-    ["java", "-jar", "/usr/share/java/plantuml.jar"],
-    ["java", "-jar", "/usr/local/share/plantuml/plantuml.jar"],
-]
+def _puml_jar_path() -> Path:
+    """Return path to bundled plantuml.jar (works in dev and PyInstaller builds)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "plantuml.jar"  # type: ignore[attr-defined]
+    return Path(__file__).parent / "plantuml.jar"
+
+
+def _make_puml_candidates() -> list[list[str]]:
+    jar = str(_puml_jar_path())
+    return [
+        ["plantuml"],
+        ["plantuml.sh"],
+        ["java", "-jar", jar],
+        ["/opt/homebrew/opt/openjdk/bin/java", "-jar", jar],
+        ["/usr/local/opt/openjdk/bin/java",    "-jar", jar],
+        ["java", "-jar", "/usr/local/opt/plantuml/libexec/plantuml.jar"],
+        ["java", "-jar", "/opt/homebrew/opt/plantuml/libexec/plantuml.jar"],
+        ["java", "-jar", "/usr/share/plantuml/plantuml.jar"],
+        ["java", "-jar", "/usr/share/java/plantuml.jar"],
+        ["java", "-jar", "/usr/local/share/plantuml/plantuml.jar"],
+    ]
+
+
+_PUML_CANDIDATES: list[list[str]] = _make_puml_candidates()
 _PUML_CMD = None      # type: list[str] | None
 _PUML_CHECKED = False
 _PUML_CACHE = {}      # {normalized_src: svg_or_error_html}
