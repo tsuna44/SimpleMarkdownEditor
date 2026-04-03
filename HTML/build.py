@@ -13,7 +13,7 @@ build.py — Markdown Editor スタンドアロン版ビルドスクリプト
     standalone_SimpleMarkdownEditor.html  ←  これ1ファイルで完全動作（外部通信ゼロ）
 """
 
-import sys, os, urllib.request, gzip, json, re
+import sys, os, urllib.request, gzip, json, re, pathlib
 
 # ── ダウンロード対象 ──────────────────────────────────────────────────
 LIBS = [
@@ -61,8 +61,19 @@ LIBS = [
         ],
         "tag": "MERMAID_JS",
         "wrap": "script",
+        "local": str(pathlib.Path(__file__).parent.parent / "vendor" / "mermaid.min.js"),
     },
 ]
+
+
+def load_vendor_versions() -> dict:
+    """Load version info from shared vendor/VERSIONS.json."""
+    versions_path = pathlib.Path(__file__).parent.parent / "vendor" / "VERSIONS.json"
+    try:
+        with open(versions_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def download(urls, name):
     """複数URLを試してダウンロード。成功したらテキストを返す。"""
@@ -87,11 +98,23 @@ def build():
     print("="*56)
     print(f"\n  Python {sys.version.split()[0]}  |  {sys.platform}\n")
 
-    # ── ライブラリをダウンロード ────────────────────────────────────
-    print("📦 ライブラリをダウンロード中...\n")
+    # ── バージョン情報をロード ──────────────────────────────────────
+    versions = load_vendor_versions()
+    mermaid_ver = versions.get("mermaid", "?")
+    plantuml_ver = versions.get("plantuml", "?")
+
+    # ── ライブラリをダウンロード（ローカルvendorがあれば優先） ─────
+    print("📦 ライブラリをロード中...\n")
     downloaded = {}
     for lib in LIBS:
-        downloaded[lib["tag"]] = download(lib["urls"], lib["name"])
+        local_path = lib.get("local")
+        if local_path and os.path.exists(local_path):
+            size_kb = os.path.getsize(local_path) // 1024
+            print(f"  ✓  {lib['name']:<28} {size_kb:>5} KB  (local vendor)")
+            with open(local_path, encoding="utf-8") as f:
+                downloaded[lib["tag"]] = f.read()
+        else:
+            downloaded[lib["tag"]] = download(lib["urls"], lib["name"])
 
     # ── アプリ本体HTML（ライブラリ参照部分を除いた純粋なアプリ） ─────
     # standalone版では動的ロード・CDN参照を全て取り除き、
@@ -275,6 +298,7 @@ def build():
   /* ── Status bar ── */
   #statusbar { display: flex; align-items: center; gap: 16px; height: var(--statusbar-h); padding: 0 14px; background: var(--status-bg); border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 11px; color: var(--status-text); flex-shrink: 0; }
   #standalone-badge { margin-left: auto; background: #2a5a8a; color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 10px; }
+  #lib-versions-badge { background: #3a5a3a; color: #c8e6c8; font-size: 10px; padding: 2px 8px; border-radius: 10px; }
 
   /* ── Toast ── */
   #toast { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(10px); background: var(--text); color: var(--surface); font-size: 12px; font-family: var(--font-sans); padding: 8px 16px; border-radius: 20px; opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; z-index: 9999; white-space: nowrap; }
@@ -361,6 +385,7 @@ def build():
     <span id="stat-words">単語数: 0</span>
     <span id="stat-cursor">行: 1, 列: 1</span>
     <span id="standalone-badge">● スタンドアロン</span>
+    <span id="lib-versions-badge">mermaid v%%MERMAID_VER%%</span>
   </div>
 </div>
 
@@ -698,6 +723,7 @@ console.log(greet("World"));
     for lib in LIBS:
         tag = lib["tag"]
         html = html.replace(f"%%{tag}%%", downloaded[tag])
+    html = html.replace("%%MERMAID_VER%%", mermaid_ver)
 
     # ── 出力 ────────────────────────────────────────────────────────
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone_SimpleMarkdownEditor.html")

@@ -15,11 +15,29 @@ import markdown
 
 # ── PlantUML command detection ───────────────────────────────────────────────
 
+def _vendor_dir() -> Path:
+    """Shared vendor directory — works both in dev and PyInstaller (sys._MEIPASS) builds."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "vendor"  # type: ignore[attr-defined]
+    return Path(__file__).parent.parent / "vendor"
+
+
 def _puml_jar_path() -> Path:
     """Return path to bundled plantuml.jar (works in dev and PyInstaller builds)."""
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "plantuml.jar"  # type: ignore[attr-defined]
-    return Path(__file__).parent / "plantuml.jar"
+    return _vendor_dir() / "plantuml.jar"
+
+
+def _load_versions() -> dict:
+    """Load vendor library versions from vendor/VERSIONS.json."""
+    try:
+        versions_path = _vendor_dir() / "VERSIONS.json"
+        import json as _json
+        with open(versions_path, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
 
 
 def _make_puml_candidates() -> list[list[str]]:
@@ -140,6 +158,79 @@ from editor_widget import CodeEditor
 from search_dialog import SearchDialog
 
 
+# ── Preview page (intercepts link navigation) ─────────────────────────────────
+
+class _PreviewPage(QWebEnginePage):
+    """QWebEnginePage that intercepts link clicks in the markdown preview.
+
+    * http/https links  → open in the system browser
+    * file:// .md links → ask the main window to open the file in a tab
+    * file:// other     → allow (images, etc.)
+    * file not found    → recover the preview instead of showing an error page
+    """
+
+    def __init__(self, tab: 'EditorTab', parent=None):
+        super().__init__(parent)
+        self._tab = tab
+
+    def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame: bool) -> bool:
+        NT = QWebEnginePage.NavigationType
+        # Always allow our programmatic loads and reloads
+        if nav_type in (NT.NavigationTypeTyped, NT.NavigationTypeReload,
+                        NT.NavigationTypeBackForward):
+            return True
+        # Let sub-frame navigations (iframes, etc.) through unchanged
+        if not is_main_frame:
+            return True
+
+        scheme = url.scheme()
+
+        # ── External links ──────────────────────────────────────────────────
+        if scheme in ('http', 'https'):
+            import webbrowser
+            webbrowser.open(url.toString())
+            return False
+
+        # ── Local file links ────────────────────────────────────────────────
+        if scheme == 'file':
+            local_path = url.toLocalFile()
+            p = Path(local_path)
+
+            # Anchor links within the same temp file → allow scroll
+            if self._tab._tmp_html and p == Path(self._tab._tmp_html):
+                return True
+
+            # If the resolved path doesn't exist, try re-resolving the
+            # relative portion against the current editor file's directory.
+            if not p.exists() and self._tab._file and self._tab._tmp_html:
+                tmp_dir = Path(self._tab._tmp_html).parent
+                try:
+                    rel = p.relative_to(tmp_dir)
+                    candidate = Path(self._tab._file).parent / rel
+                    if candidate.exists():
+                        p = candidate
+                except ValueError:
+                    pass
+
+            if p.exists():
+                if p.suffix.lower() in ('.md', '.markdown', '.txt'):
+                    # Open the linked file in the editor
+                    win = self._tab.window()
+                    if hasattr(win, '_openOrSwitchToFile'):
+                        path_str = str(p)
+                        QTimer.singleShot(0, lambda: win._openOrSwitchToFile(path_str))
+                    return False
+                # Other local files (images, etc.) → let the browser handle
+                return True
+
+            # File not found — recover by re-rendering current content
+            QTimer.singleShot(0, self._tab._updatePreview)
+            return False
+
+        # Block any other unknown schemes
+        return False
+
+
 _DEFAULT_MD = """\
 # Simple Markdown Editor
 
@@ -247,6 +338,8 @@ class EditorTab(QWidget):
         lbl_p.setObjectName("pane-label")
         lbl_p.setFixedHeight(18)
         self.preview = QWebEngineView()
+        page = _PreviewPage(self, self.preview)
+        self.preview.setPage(page)
         self.preview.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
         )
@@ -340,6 +433,9 @@ class EditorTab(QWidget):
             pass
         if ok:
             self._updatePreview()
+        else:
+            # Navigation error — reload the shell and re-render current content
+            QTimer.singleShot(0, self.reloadPreview)
 
     def _updatePreview(self):
         body_html = self._mdToHtml(self.editor.toPlainText())
@@ -610,7 +706,10 @@ class MarkdownEditor(QMainWindow):
         self._lnColLbl = QLabel("Ln 1, Col 1")
         self._wordsLbl = QLabel("0 words")
         self._charsLbl = QLabel("0 chars")
-        badge = QLabel("Python / PySide6")
+        versions = _load_versions()
+        mermaid_ver = versions.get("mermaid", "?")
+        plantuml_ver = versions.get("plantuml", "?")
+        badge = QLabel(f"Python / PySide6  |  mermaid v{mermaid_ver}  |  plantuml v{plantuml_ver}")
         badge.setObjectName("badge")
         sb.addWidget(self._lnColLbl)
         sb.addWidget(QLabel("|"))
@@ -675,6 +774,24 @@ class MarkdownEditor(QMainWindow):
         self._closeTab(self.tabs.currentIndex())
 
     # ── File operations
+
+    def _openOrSwitchToFile(self, path: str):
+        """Open *path* in the editor, reusing an existing tab if already open."""
+        abs_path = str(Path(path).resolve())
+        # Check if any tab already has this file open
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if tab and tab._file and str(Path(tab._file).resolve()) == abs_path:
+                self.tabs.setCurrentIndex(i)
+                return
+        # Reuse current tab if empty and unmodified
+        cur = self._curTab()
+        if cur and cur._file is None and not cur._modified \
+                and not cur.editor.toPlainText().strip():
+            cur.loadFile(abs_path)
+            cur.applyTheme(self._dark)
+        else:
+            self._addTab(file_path=abs_path)
 
     def _openFile(self):
         paths, _ = QFileDialog.getOpenFileNames(

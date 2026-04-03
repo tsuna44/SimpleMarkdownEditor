@@ -14,7 +14,7 @@ dist/
 *.spec
 
 # Large binary assets (download separately)
-plantuml.jar
+vendor/plantuml.jar
 
 # macOS
 .DS_Store

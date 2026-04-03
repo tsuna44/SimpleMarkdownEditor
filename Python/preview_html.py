@@ -14,7 +14,7 @@ def _vendor_dir() -> Path:
     """Vendor directory — works both in dev and PyInstaller (sys._MEIPASS) builds."""
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "vendor"  # type: ignore[attr-defined]
-    return Path(__file__).parent / "vendor"
+    return Path(__file__).parent.parent / "vendor"
 
 
 @lru_cache(maxsize=1)

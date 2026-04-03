@@ -13,9 +13,11 @@ import json
 import urllib.request
 from pathlib import Path
 
-HTML_PATH = Path(__file__).parent / "HTML" / "standalone_SimpleMarkdownEditor.html"
-CDN_BASE  = "https://cdn.jsdelivr.net/npm/mermaid@{version}/dist/mermaid.min.js"
-NPM_LATEST = "https://registry.npmjs.org/mermaid/latest"
+HTML_PATH      = Path(__file__).parent / "HTML" / "standalone_SimpleMarkdownEditor.html"
+VENDOR_JS      = Path(__file__).parent / "vendor" / "mermaid.min.js"
+VERSIONS_JSON  = Path(__file__).parent / "vendor" / "VERSIONS.json"
+CDN_BASE       = "https://cdn.jsdelivr.net/npm/mermaid@{version}/dist/mermaid.min.js"
+NPM_LATEST     = "https://registry.npmjs.org/mermaid/latest"
 
 BEGIN_PATTERN = re.compile(r"<!-- MERMAID_BEGIN v([\d.]+) -->")
 BLOCK_PATTERN = re.compile(
@@ -82,6 +84,18 @@ def main():
     HTML_PATH.write_text(new_content, encoding="utf-8")
     print(f"Done. Updated v{cur} → v{target}")
     print(f"File: {HTML_PATH}")
+
+    # Also update shared vendor/mermaid.min.js
+    VENDOR_JS.write_text(js, encoding="utf-8")
+    print(f"Updated vendor: {VENDOR_JS}")
+
+    # Update VERSIONS.json
+    versions = {}
+    if VERSIONS_JSON.exists():
+        versions = json.loads(VERSIONS_JSON.read_text(encoding="utf-8"))
+    versions["mermaid"] = target
+    VERSIONS_JSON.write_text(json.dumps(versions, indent=2) + "\n", encoding="utf-8")
+    print(f"Updated versions: {VERSIONS_JSON}")
 
 
 if __name__ == "__main__":
