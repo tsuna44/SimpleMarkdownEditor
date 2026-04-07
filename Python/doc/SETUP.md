@@ -49,7 +49,7 @@ pip install -r requirements.txt
 
 | パッケージ | バージョン | 用途 |
 |---|---|---|
-| PySide6 | >=6.10, <6.11 | GUI フレームワーク (Qt6) |
+| PySide6 | >=6.10, <6.12 | GUI フレームワーク (Qt6) |
 | markdown | >=3.5 | Markdown → HTML 変換 |
 | pygments | >=2.17 | コードブロックのシンタックスハイライト |
 
@@ -153,10 +153,10 @@ build_windows.bat --clean
 
 ### `qt.qpa.plugin: Could not find the Qt platform plugin "cocoa"` (macOS)
 
-PySide6 のバージョンが 6.11.x の場合に発生する既知の不具合です。
+PySide6 のバージョンが 6.12.x 以降の場合に発生する可能性があります。
 
 ```bash
-pip install "PySide6>=6.10,<6.11"
+pip install "PySide6>=6.10,<6.12"
 ```
 
 ### `ModuleNotFoundError: No module named 'PySide6'`

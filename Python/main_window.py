@@ -146,7 +146,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
-from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths
 from PySide6.QtGui import (
     QKeySequence, QTextCursor,
     QAction, QPageLayout, QPageSize,
@@ -583,6 +583,12 @@ class MarkdownEditor(QMainWindow):
         super().__init__()
         self._dark = False
         self._font_size = 14
+        config_dir = Path(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppConfigLocation))
+        config_dir.mkdir(parents=True, exist_ok=True)
+        self._settings = QSettings(
+            str(config_dir / "settings.ini"), QSettings.Format.IniFormat)
+        self._last_dir = self._settings.value("last_dir", str(Path.home()))
 
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
@@ -793,12 +799,17 @@ class MarkdownEditor(QMainWindow):
         else:
             self._addTab(file_path=abs_path)
 
+    def _setLastDir(self, path: str):
+        self._last_dir = path
+        self._settings.setValue("last_dir", path)
+
     def _openFile(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "ファイルを開く", "",
+            self, "ファイルを開く", self._last_dir,
             "Markdown Files (*.md *.markdown);;Text Files (*.txt);;All Files (*)",
         )
         for path in paths:
+            self._setLastDir(str(Path(path).parent))
             # Reuse current tab if it is empty and unmodified
             tab = self._curTab()
             if tab and tab._file is None and not tab._modified \
@@ -822,11 +833,13 @@ class MarkdownEditor(QMainWindow):
         tab = self._curTab()
         if not tab:
             return
+        default = tab._file or str(Path(self._last_dir) / "untitled.md")
         path, _ = QFileDialog.getSaveFileName(
-            self, "名前を付けて保存", tab._file or "untitled.md",
+            self, "名前を付けて保存", default,
             "Markdown Files (*.md *.markdown);;Text Files (*.txt);;All Files (*)",
         )
         if path:
+            self._setLastDir(str(Path(path).parent))
             tab._file = path
             tab.saveFile()
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
@@ -836,11 +849,13 @@ class MarkdownEditor(QMainWindow):
         if not tab:
             return
         stem = Path(tab._file).stem if tab._file else "document"
+        default = str(Path(self._last_dir) / f"{stem}.pdf")
         path, _ = QFileDialog.getSaveFileName(
-            self, "PDF として保存", f"{stem}.pdf", "PDF Files (*.pdf)"
+            self, "PDF として保存", default, "PDF Files (*.pdf)"
         )
         if not path:
             return
+        self._setLastDir(str(Path(path).parent))
         layout = QPageLayout(
             QPageSize(QPageSize.PageSizeId.A4),
             QPageLayout.Orientation.Portrait,

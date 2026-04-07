@@ -53,7 +53,9 @@ set ARGS=--name %APP_NAME% ^
   --hidden-import PySide6.QtWebEngineWidgets ^
   --hidden-import PySide6.QtWebEngineCore ^
   --hidden-import PySide6.QtWebEngineQuick ^
-  --add-data "vendor;vendor"
+  --add-data "..\vendor\mermaid.min.js;vendor" ^
+  --add-data "..\vendor\VERSIONS.json;vendor" ^
+  --add-data "..\vendor\plantuml.jar;."
 
 if "%ONEFILE%"=="true" (
   set ARGS=!ARGS! --onefile

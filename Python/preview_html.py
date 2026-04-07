@@ -173,7 +173,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
       const b64 = btoa(unescape(encodeURIComponent(svgData)));
       const img = new Image();
       img.onload = () => {{
-        const scale = 2;
+        const scale = 4;
         const canvas = document.createElement('canvas');
         canvas.width  = w * scale;
         canvas.height = h * scale;
