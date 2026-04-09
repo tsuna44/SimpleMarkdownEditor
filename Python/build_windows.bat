@@ -35,6 +35,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM -- vendor files -------------------------------------------------------------
+if not exist "..\vendor" mkdir "..\vendor"
+
+if not exist "..\vendor\mermaid.min.js" (
+  echo ^>^>^> vendor\mermaid.min.js not found -- running update_mermaid.py ...
+  python ..\update_mermaid.py
+  if errorlevel 1 (
+    echo [ERROR] update_mermaid.py failed.
+    exit /b 1
+  )
+)
+
 REM -- check / install PyInstaller ----------------------------------------------
 python -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
@@ -54,8 +66,14 @@ set ARGS=--name %APP_NAME% ^
   --hidden-import PySide6.QtWebEngineCore ^
   --hidden-import PySide6.QtWebEngineQuick ^
   --add-data "..\vendor\mermaid.min.js;vendor" ^
-  --add-data "..\vendor\VERSIONS.json;vendor" ^
-  --add-data "..\vendor\plantuml.jar;."
+  --add-data "..\vendor\VERSIONS.json;vendor"
+
+if exist "..\vendor\plantuml.jar" (
+  set ARGS=!ARGS! --add-data "..\vendor\plantuml.jar;."
+) else (
+  echo WARNING: vendor\plantuml.jar not found -- PlantUML will not be bundled.
+  echo          Download from https://plantuml.com/download and place at vendor\plantuml.jar
+)
 
 if "%ONEFILE%"=="true" (
   set ARGS=!ARGS! --onefile

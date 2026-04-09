@@ -151,6 +151,7 @@ from PySide6.QtGui import (
     QKeySequence, QTextCursor,
     QAction, QPageLayout, QPageSize,
 )
+from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
 from themes import DARK, LIGHT
 from preview_html import _shell_html
@@ -592,10 +593,31 @@ class MarkdownEditor(QMainWindow):
 
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
+        self.setAcceptDrops(True)
 
         if initial_file and Path(initial_file).exists():
             self._curTab().loadFile(initial_file)
         # else the first tab already has _DEFAULT_MD
+
+    # ── Drag & Drop
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if any(u.isLocalFile() for u in urls):
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                path = url.toLocalFile()
+                p = Path(path)
+                if p.is_file():
+                    self._setLastDir(str(p.parent))
+                    self._openOrSwitchToFile(path)
+        event.acceptProposedAction()
 
     # ── UI construction
 
@@ -657,6 +679,7 @@ class MarkdownEditor(QMainWindow):
         file_menu.addAction("💾  Save As…",  self._saveFileAs)
         file_menu.addSeparator()
         file_menu.addAction("📑  Export PDF…", self._exportPdf).setShortcut(QKeySequence("Ctrl+Shift+E"))
+        file_menu.addAction("🖨  Print…",      self._printDoc).setShortcut(QKeySequence("Ctrl+P"))
         file_menu.addSeparator()
         file_menu.addAction("✖  Close Tab",  self._closeCurrentTab).setShortcut(QKeySequence("Ctrl+W"))
 
@@ -861,7 +884,69 @@ class MarkdownEditor(QMainWindow):
             QPageLayout.Orientation.Portrait,
             QMarginsF(15, 15, 15, 15),
         )
-        tab.preview.page().printToPdf(path, layout)
+
+        # JS: scaleSvg() が SVG 要素に付けた width/height 属性を一時的に除去。
+        # @media print の max-width: 100% が確実に効くようにする。
+        _JS_STRIP = (
+            "document.querySelectorAll('.mermaid svg, .plantuml svg').forEach(svg => {"
+            "  svg.dataset.pw = svg.getAttribute('width') || '';"
+            "  svg.dataset.ph = svg.getAttribute('height') || '';"
+            "  svg.removeAttribute('width');"
+            "  svg.removeAttribute('height');"
+            "});"
+        )
+        _JS_RESTORE = (
+            "document.querySelectorAll('.mermaid svg, .plantuml svg').forEach(svg => {"
+            "  if (svg.dataset.pw) svg.setAttribute('width',  svg.dataset.pw);"
+            "  if (svg.dataset.ph) svg.setAttribute('height', svg.dataset.ph);"
+            "});"
+        )
+
+        page = tab.preview.page()
+
+        def _do_print(_=None):
+            def _on_pdf(data: bytes):
+                with open(path, "wb") as f:
+                    f.write(data)
+                page.runJavaScript(_JS_RESTORE)
+            page.printToPdf(_on_pdf, layout)
+
+        page.runJavaScript(_JS_STRIP, _do_print)
+
+    def _printDoc(self):
+        tab = self._curTab()
+        if not tab:
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return
+
+        _JS_STRIP = (
+            "document.querySelectorAll('.mermaid svg, .plantuml svg').forEach(svg => {"
+            "  svg.dataset.pw = svg.getAttribute('width') || '';"
+            "  svg.dataset.ph = svg.getAttribute('height') || '';"
+            "  svg.removeAttribute('width');"
+            "  svg.removeAttribute('height');"
+            "});"
+        )
+        _JS_RESTORE = (
+            "document.querySelectorAll('.mermaid svg, .plantuml svg').forEach(svg => {"
+            "  if (svg.dataset.pw) svg.setAttribute('width',  svg.dataset.pw);"
+            "  if (svg.dataset.ph) svg.setAttribute('height', svg.dataset.ph);"
+            "});"
+        )
+
+        page = tab.preview.page()
+
+        def _do_print(_=None):
+            def _on_done(success: bool):
+                page.runJavaScript(_JS_RESTORE)
+                if not success:
+                    QMessageBox.warning(self, "印刷エラー", "印刷中にエラーが発生しました。")
+            page.print(printer, _on_done)
+
+        page.runJavaScript(_JS_STRIP, _do_print)
 
     def _confirmDiscard(self, tab) -> bool:
         if not tab._modified:

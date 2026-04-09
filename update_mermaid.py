@@ -86,6 +86,7 @@ def main():
     print(f"File: {HTML_PATH}")
 
     # Also update shared vendor/mermaid.min.js
+    VENDOR_JS.parent.mkdir(parents=True, exist_ok=True)
     VENDOR_JS.write_text(js, encoding="utf-8")
     print(f"Updated vendor: {VENDOR_JS}")
 

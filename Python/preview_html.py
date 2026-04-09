@@ -118,11 +118,73 @@ def _shell_html(theme: dict, dark: bool) -> str:
   .diagram-btn:hover {{ background: {t['accent']}; color: #fff; border-color: {t['accent']}; }}
   .diagram-btn.ok {{ background: #2a7a2a; color: #fff; border-color: #2a7a2a; }}
   .diagram-btn.ng {{ background: #a02020; color: #fff; border-color: #a02020; }}
+  .png-scale-select {{
+    padding: 3px 4px; font-size: 11px; cursor: pointer;
+    border: 1px solid {t['border']}; border-radius: 4px;
+    background: {t['surface']}; color: {t['text2']};
+    font-family: 'JetBrains Mono', monospace;
+    transition: background .15s, color .15s, border-color .15s;
+  }}
   ::-webkit-scrollbar {{ width:6px; height:6px; }}
   ::-webkit-scrollbar-track {{ background:{t['surface2']}; }}
   ::-webkit-scrollbar-thumb {{ background:{t['border']}; border-radius:3px; }}
   /* Pygments */
   {pygments_css}
+
+  /* ── Print / PDF ───────────────────────────────────────────────────────────── */
+  @media print {{
+    body {{
+      font-size: 10.5pt;
+      line-height: 1.6;
+      background: white !important;
+      color: black !important;
+      padding: 0 !important;
+      margin: 0 !important;
+    }}
+    h1, h2, h3, h4, h5, h6 {{ color: #111 !important; }}
+    h1 {{ border-bottom-color: #333 !important; }}
+    h2 {{ border-bottom-color: #aaa !important; }}
+    a {{ color: #1a0dab !important; }}
+    code {{
+      background: #f4f4f4 !important;
+      color: #333 !important;
+    }}
+    pre {{
+      background: #f4f4f4 !important;
+      border: 1px solid #ccc !important;
+      overflow: visible;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }}
+    blockquote {{
+      background: #f9f9f9 !important;
+      border-left-color: #888 !important;
+      color: #444 !important;
+    }}
+    th {{ background: #eee !important; }}
+    tr:nth-child(even) td {{ background: #f9f9f9 !important; }}
+    table {{ page-break-inside: avoid; break-inside: avoid; }}
+    /* 図のアクションボタンは非表示 */
+    .diagram-actions {{ display: none !important; }}
+    /* 図コンテナ: overflow を解放してクリップを防ぐ */
+    .mermaid, .plantuml {{
+      overflow: visible !important;
+      padding: 8px !important;
+      background: white !important;
+      border: 1px solid #ccc !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      max-width: 100%;
+    }}
+    /* SVG: ページ幅に収まるよう縮小、縦横比を維持 */
+    .mermaid svg, .plantuml svg {{
+      max-width: 100% !important;
+      width: auto !important;
+      height: auto !important;
+    }}
+    img {{ max-width: 100% !important; }}
+  }}
 </style>
 {_mermaid_script_tag()}
 <script>
@@ -152,9 +214,9 @@ def _shell_html(theme: dict, dark: bool) -> str:
     document.querySelectorAll('.mermaid svg').forEach(scaleSvg);
   }};
 
-  // SVG → PNG data URL (2× retina, white background)
+  // SVG → PNG data URL (white background)
   // Uses viewBox for full diagram size, not the clipped viewport rect.
-  function svgToPngDataUrl(svg) {{
+  function svgToPngDataUrl(svg, scale) {{
     return new Promise((resolve, reject) => {{
       // Prefer viewBox (full diagram) over getBoundingClientRect (visible area only)
       const vb = svg.viewBox && svg.viewBox.baseVal;
@@ -173,7 +235,6 @@ def _shell_html(theme: dict, dark: bool) -> str:
       const b64 = btoa(unescape(encodeURIComponent(svgData)));
       const img = new Image();
       img.onload = () => {{
-        const scale = 4;
         const canvas = document.createElement('canvas');
         canvas.width  = w * scale;
         canvas.height = h * scale;
@@ -189,10 +250,11 @@ def _shell_html(theme: dict, dark: bool) -> str:
     }});
   }}
 
-  async function copyAsPng(svg, btn) {{
+  async function copyAsPng(svg, btn, scaleSelect) {{
     const orig = btn.textContent;
+    const scale = parseFloat(scaleSelect.value) || 4;
     try {{
-      const dataUrl = await svgToPngDataUrl(svg);
+      const dataUrl = await svgToPngDataUrl(svg, scale);
       const res   = await fetch(dataUrl);
       const blob  = await res.blob();
       await navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]);
@@ -222,15 +284,24 @@ def _shell_html(theme: dict, dark: bool) -> str:
     scaleSvg(svg);  // apply current font size scale immediately after render
     const wrap = document.createElement('div');
     wrap.className = 'diagram-actions';
+    const scaleSelect = document.createElement('select');
+    scaleSelect.className = 'png-scale-select';
+    scaleSelect.title = 'PNG resolution (×)';
+    for (const [label, val] of [['1×', '1'], ['2×', '2'], ['4×', '4'], ['8×', '8']]) {{
+      const opt = document.createElement('option');
+      opt.value = val; opt.textContent = label;
+      if (val === '4') opt.selected = true;
+      scaleSelect.appendChild(opt);
+    }}
     const pngBtn = document.createElement('button');
     pngBtn.className = 'diagram-btn';
     pngBtn.textContent = '📋 Copy PNG';
-    pngBtn.onclick = () => copyAsPng(svg, pngBtn);
+    pngBtn.onclick = () => copyAsPng(svg, pngBtn, scaleSelect);
     const svgBtn = document.createElement('button');
     svgBtn.className = 'diagram-btn';
     svgBtn.textContent = '⬇ SVG';
     svgBtn.onclick = () => downloadSvg(svg, idx);
-    wrap.appendChild(pngBtn); wrap.appendChild(svgBtn);
+    wrap.appendChild(scaleSelect); wrap.appendChild(pngBtn); wrap.appendChild(svgBtn);
     el.appendChild(wrap);
   }}
 </script>

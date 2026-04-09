@@ -64,6 +64,15 @@ if $CLEAN; then
   rm -rf build dist "${APP_NAME}.spec"
 fi
 
+# ── vendor files ──────────────────────────────────────────────────────────────
+VENDOR_DIR="$SCRIPT_DIR/../vendor"
+mkdir -p "$VENDOR_DIR"
+
+if [[ ! -f "$VENDOR_DIR/mermaid.min.js" ]]; then
+  echo ">>> vendor/mermaid.min.js not found — running update_mermaid.py ..."
+  "$PYTHON" "$SCRIPT_DIR/../update_mermaid.py"
+fi
+
 # ── check / install PyInstaller ───────────────────────────────────────────────
 if ! "$PYTHON" -m PyInstaller --version &>/dev/null; then
   echo ">>> PyInstaller not found — installing ..."
@@ -84,8 +93,14 @@ PYINSTALLER_ARGS=(
   --hidden-import PySide6.QtWebEngineQuick
   --add-data "../vendor/mermaid.min.js:vendor"
   --add-data "../vendor/VERSIONS.json:vendor"
-  --add-data "../vendor/plantuml.jar:."
 )
+
+if [[ -f "$VENDOR_DIR/plantuml.jar" ]]; then
+  PYINSTALLER_ARGS+=(--add-data "../vendor/plantuml.jar:.")
+else
+  echo ">>> WARNING: vendor/plantuml.jar not found — PlantUML will not be bundled."
+  echo "            Download from https://plantuml.com/download and place at vendor/plantuml.jar"
+fi
 
 if $ONEFILE; then
   PYINSTALLER_ARGS+=(--onefile)
