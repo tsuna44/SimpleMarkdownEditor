@@ -142,7 +142,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QTabWidget,
     QVBoxLayout, QFileDialog, QLabel,
     QMessageBox, QSizePolicy, QToolBar,
-    QToolButton, QMenu,
+    QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
@@ -197,8 +197,9 @@ class _PreviewPage(QWebEnginePage):
             local_path = url.toLocalFile()
             p = Path(local_path)
 
-            # Anchor links within the same temp file → allow scroll
-            if self._tab._tmp_html and p == Path(self._tab._tmp_html):
+            # Anchor links within the same temp file → allow scroll.
+            # Use resolve() because /tmp may be a symlink (e.g. macOS /private/tmp).
+            if self._tab._tmp_html and p.resolve() == Path(self._tab._tmp_html).resolve():
                 return True
 
             # If the resolved path doesn't exist, try re-resolving the
@@ -230,6 +231,49 @@ class _PreviewPage(QWebEnginePage):
 
         # Block any other unknown schemes
         return False
+
+
+# ── Outline panel ─────────────────────────────────────────────────────────────
+
+class OutlinePanel(QWidget):
+    """Heading outline panel — shows H1/H2/H3 as a clickable list."""
+
+    jumpTo = Signal(int)  # 0-based line number
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        lbl = QLabel("OUTLINE")
+        lbl.setObjectName("pane-label")
+        lbl.setFixedHeight(18)
+        lay.addWidget(lbl)
+
+        self._list = QListWidget()
+        self._list.setObjectName("outline-list")
+        self._list.setFrameShape(QListWidget.Shape.NoFrame)
+        self._list.itemClicked.connect(self._onItemClicked)
+        lay.addWidget(self._list)
+
+    def refresh(self, text: str):
+        self._list.clear()
+        for lineno, line in enumerate(text.splitlines()):
+            m = re.match(r'^(#{1,3})\s+(.+)$', line)
+            if not m:
+                continue
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            item = QListWidgetItem("  " * (level - 1) + title)
+            item.setData(Qt.ItemDataRole.UserRole, lineno)
+            f = item.font()
+            f.setBold(level == 1)
+            item.setFont(f)
+            self._list.addItem(item)
+
+    def _onItemClicked(self, item: QListWidgetItem):
+        self.jumpTo.emit(item.data(Qt.ItemDataRole.UserRole))
 
 
 _DEFAULT_MD = """\
@@ -354,6 +398,9 @@ class EditorTab(QWidget):
         self.splitter.setSizes([640, 640])
         lay.addWidget(self.splitter)
 
+        # Scroll sync: editor → preview (one-directional)
+        self.editor.verticalScrollBar().valueChanged.connect(self._syncScroll)
+
     # ── title
 
     def tabTitle(self) -> str:
@@ -379,6 +426,15 @@ class EditorTab(QWidget):
 
     def _mdToHtml(self, text: str) -> str:
         text = re.sub(r'~~(.+?)~~', r'<del>\1</del>', text)
+
+        # Auto-inject markdown="1" on <details> so the md_in_html extension
+        # (bundled in markdown.extensions.extra) processes Markdown inside,
+        # e.g. tables, lists, code blocks.
+        text = re.sub(
+            r'<details(?![^>]*\bmarkdown=)([^>]*)>',
+            r'<details\1 markdown="1">',
+            text,
+        )
 
         def mermaid_block(m):
             code = m.group(1).strip()
@@ -455,6 +511,20 @@ if (typeof mermaid !== 'undefined') {{
         }});
 }}
 """)
+        # Re-sync scroll after content renders (allow 150 ms for layout)
+        QTimer.singleShot(150, self._syncScroll)
+
+    # ── scroll sync
+
+    def _syncScroll(self, _value=None):
+        """Sync preview scroll position to match the editor (proportional)."""
+        sb = self.editor.verticalScrollBar()
+        maximum = sb.maximum()
+        ratio = (sb.value() / maximum) if maximum > 0 else 0.0
+        self.preview.page().runJavaScript(
+            f"(function(){{var h=document.body.scrollHeight-window.innerHeight;"
+            f"if(h>0)window.scrollTo(0,{ratio:.6f}*h);}})();"
+        )
 
     # ── theme / font size
 
@@ -591,6 +661,8 @@ class MarkdownEditor(QMainWindow):
             str(config_dir / "settings.ini"), QSettings.Format.IniFormat)
         self._last_dir = self._settings.value("last_dir", str(Path.home()))
 
+        self._outline_timer = QTimer(singleShot=True, interval=300)
+
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
         self.setAcceptDrops(True)
@@ -632,6 +704,21 @@ class MarkdownEditor(QMainWindow):
         vbox.setSpacing(0)
 
         self._buildToolbar()
+
+        # Outline dock (left side, hidden by default)
+        self._outline = OutlinePanel()
+        self._outline.jumpTo.connect(self._jumpToLine)
+        self._outline_dock = QDockWidget(self)
+        self._outline_dock.setObjectName("outline-dock")
+        self._outline_dock.setTitleBarWidget(QWidget(self._outline_dock))  # hide title bar
+        self._outline_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self._outline_dock.setWidget(self._outline)
+        self._outline_dock.setMinimumWidth(180)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._outline_dock)
+        self._outline_dock.hide()
+        self._outline_timer.timeout.connect(self._updateOutline)
 
         # Tab widget
         self.tabs = QTabWidget()
@@ -693,6 +780,7 @@ class MarkdownEditor(QMainWindow):
         tb1.addSeparator()
         self._themeAct = act(tb1, "☀", "テーマ切り替え", self._toggleTheme)
         act(tb1, "🔍", "検索・置換 (Ctrl+F)", self._showSearch, "Ctrl+F")
+        self._outlineAct = act(tb1, "≡", "アウトライン (Ctrl+Shift+O)", self._toggleOutline, "Ctrl+Shift+O")
 
         tb1.addSeparator()
         act(tb1, "A−", "文字を小さく", self._fontSizeDown)
@@ -738,8 +826,15 @@ class MarkdownEditor(QMainWindow):
         versions = _load_versions()
         mermaid_ver = versions.get("mermaid", "?")
         plantuml_ver = versions.get("plantuml", "?")
-        badge = QLabel(f"Python / PySide6  |  mermaid v{mermaid_ver}  |  plantuml v{plantuml_ver}")
+        import PySide6
+        py_ver = ".".join(str(v) for v in sys.version_info[:3])
+        ps6_ver = PySide6.__version__
+        badge = QLabel(f"mermaid v{mermaid_ver}  |  plantuml v{plantuml_ver}")
         badge.setObjectName("badge")
+        badge.setToolTip(
+            f"Python {py_ver}  |  PySide6 {ps6_ver}\n"
+            f"mermaid {mermaid_ver}  |  plantuml {plantuml_ver}"
+        )
         sb.addWidget(self._lnColLbl)
         sb.addWidget(QLabel("|"))
         sb.addWidget(self._wordsLbl)
@@ -758,6 +853,7 @@ class MarkdownEditor(QMainWindow):
         tab.titleChanged.connect(lambda title, t=tab: self._onTabTitleChanged(t, title))
         tab.editor.cursorPositionChanged.connect(self._updateStatus)
         tab.editor.textChanged.connect(self._updateStatus)
+        tab.editor.textChanged.connect(lambda t=tab: self._onTabTextChanged(t))
 
         if file_path:
             idx = self.tabs.addTab(tab, Path(file_path).name)
@@ -786,6 +882,7 @@ class MarkdownEditor(QMainWindow):
         if tab:
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
             self._updateStatus()
+            self._updateOutline()
 
     def _newTab(self):
         self._addTab()
@@ -987,6 +1084,36 @@ class MarkdownEditor(QMainWindow):
         self._wordsLbl.setText(f"{words} words")
         self._charsLbl.setText(f"{len(text)} chars")
 
+    # ── Outline
+
+    def _toggleOutline(self):
+        if self._outline_dock.isVisible():
+            self._outline_dock.hide()
+        else:
+            self._outline_dock.show()
+            self._updateOutline()
+
+    def _updateOutline(self):
+        if not self._outline_dock.isVisible():
+            return
+        tab = self._curTab()
+        if tab:
+            self._outline.refresh(tab.editor.toPlainText())
+
+    def _onTabTextChanged(self, tab):
+        if tab is self._curTab() and self._outline_dock.isVisible():
+            self._outline_timer.start()
+
+    def _jumpToLine(self, lineno: int):
+        tab = self._curTab()
+        if not tab:
+            return
+        block = tab.editor.document().findBlockByLineNumber(lineno)
+        cursor = tab.editor.textCursor()
+        cursor.setPosition(block.position())
+        tab.editor.setTextCursor(cursor)
+        tab.editor.setFocus()
+
     # ── Insert / search
 
     def _insert(self, kind: str):
@@ -1080,7 +1207,7 @@ class MarkdownEditor(QMainWindow):
                 font-family: 'JetBrains Mono', monospace;
                 font-size: 11px; color: {t["text2"]};
             }}
-            QLabel#badge {{
+            QStatusBar#statusbar QLabel#badge {{
                 background: #2a5a8a; color: #fff;
                 font-size: 10px; padding: 2px 8px; border-radius: 10px;
             }}
@@ -1094,6 +1221,22 @@ class MarkdownEditor(QMainWindow):
                 font-size: 10px; padding: 0 4px;
             }}
             QSplitter::handle {{ background: {t["border"]}; width: 1px; }}
+            QDockWidget#outline-dock {{ border: none; }}
+            QListWidget#outline-list {{
+                background: {t["surface"]}; color: {t["text"]};
+                border: none; outline: none;
+                font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+                font-size: 11px;
+            }}
+            QListWidget#outline-list::item {{
+                padding: 3px 10px; border-radius: 3px;
+            }}
+            QListWidget#outline-list::item:selected {{
+                background: {t["accent"]}; color: #fff;
+            }}
+            QListWidget#outline-list::item:hover:!selected {{
+                background: {t["surface2"]}; color: {t["accent"]};
+            }}
             QDialog {{ background: {t["surface"]}; color: {t["text"]}; }}
             QLineEdit {{
                 background: {t["surface2"]}; color: {t["text"]};

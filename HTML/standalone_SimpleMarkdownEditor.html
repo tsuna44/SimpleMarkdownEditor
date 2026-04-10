@@ -208,6 +208,26 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
   [data-theme="dark"] #hljs-light-style { display: none; }
   [data-theme="dark"] #hljs-dark-style { display: block !important; }
   [data-theme="light"] #hljs-dark-style { display: none; }
+
+  /* ── Font size display ── */
+  #font-size-display {
+    font-family: var(--font-mono); font-size: 11px; color: var(--text2);
+    min-width: 26px; text-align: center; user-select: none; pointer-events: none;
+  }
+  /* ── Sync scroll active state ── */
+  .tb-btn.sync-on { color: var(--accent); background: var(--accent-bg); }
+
+  /* ── Print styles ── */
+  @media print {
+    #toolbar, #editor-pane, #resizer, #statusbar, #search-panel, #toast { display: none !important; }
+    #app { overflow: visible !important; height: auto !important; }
+    #panes { overflow: visible !important; display: block !important; }
+    #preview-pane { display: block !important; flex: none !important; overflow: visible !important; }
+    #preview { overflow: visible !important; height: auto !important; padding: 0 !important; }
+    html, body { height: auto !important; overflow: visible !important; }
+    #preview a { color: #000; }
+    #preview pre { white-space: pre-wrap; }
+  }
 </style>
 </head>
 <body>
@@ -242,6 +262,13 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
       <svg id="icon-moon" viewBox="0 0 24 24" style="display:none"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
     </button>
     <button class="tb-btn icon-only" onclick="toggleSearchPanel()" id="search-tb-btn" title="検索・置換 (Ctrl+F)"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn icon-only" onclick="changeFontSize(-1)" title="フォントサイズを縮小"><svg viewBox="0 0 24 24"><text x="2" y="16" font-size="13" stroke="none" fill="currentColor" font-family="sans-serif">A</text><text x="14" y="19" font-size="9" stroke="none" fill="currentColor" font-family="sans-serif">−</text></svg></button>
+    <span id="font-size-display">13</span>
+    <button class="tb-btn icon-only" onclick="changeFontSize(1)" title="フォントサイズを拡大"><svg viewBox="0 0 24 24"><text x="2" y="16" font-size="13" stroke="none" fill="currentColor" font-family="sans-serif">A</text><text x="14" y="19" font-size="9" stroke="none" fill="currentColor" font-family="sans-serif">+</text></svg></button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn icon-only sync-on" id="sync-scroll-btn" onclick="toggleSyncScroll()" title="同期スクロール (有効)"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 00-2 2v14a2 2 0 002 2h3"/><path d="M16 3h3a2 2 0 012 2v14a2 2 0 01-2 2h-3"/><line x1="12" y1="3" x2="12" y2="21"/></svg></button>
+    <button class="tb-btn icon-only" onclick="printPreview()" title="印刷 / PDF出力 (Ctrl+P)"><svg viewBox="0 0 24 24"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>
   </div>
 
   <div id="search-panel">
@@ -4868,7 +4895,22 @@ if (!Array.prototype.findLastIndex) {
     catch(e) { h = code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
     return `<pre><code class="hljs language-${lang||''}">${h}</code></pre>`;
   };
+  renderer.heading = function(text, level) {
+    const id = text.toLowerCase().replace(/[^\w\s\u3040-\u9fff-]/g, '').replace(/\s+/g, '-');
+    return `<h${level} id="${id}">${text}</h${level}>\n`;
+  };
   marked.use({ renderer });
+
+  // ── アンカーリンクのクリックハンドラ ─────────────────────────────
+  preview.addEventListener('click', e => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (!href.startsWith('#')) return;
+    e.preventDefault();
+    const target = preview.querySelector(href) || document.getElementById(href.slice(1));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 
   // ── Mermaid copy helpers ─────────────────────────────────────────
   async function copySvg(wrap) { const s = wrap.querySelector('svg'); if (!s) return; await navigator.clipboard.writeText(new XMLSerializer().serializeToString(s)); }
@@ -4896,9 +4938,22 @@ if (!Array.prototype.findLastIndex) {
   }
 
   // ── Render ───────────────────────────────────────────────────────
+  function preprocessDetailsBlocks(text) {
+    // <details> 内のマークダウンを事前にパースする（テーブル等が正しくレンダリングされるよう）
+    return text.replace(/<details([\s\S]*?)>([\s\S]*?)<\/details>/gi, (match, attrs, inner) => {
+      const summaryMatch = inner.match(/^([\s\S]*?<\/summary>)([\s\S]*)$/i);
+      if (summaryMatch) {
+        const summaryPart = summaryMatch[1];
+        const contentPart = summaryMatch[2];
+        return `<details${attrs}>${summaryPart}${marked.parse(contentPart)}</details>`;
+      }
+      return `<details${attrs}>${marked.parse(inner)}</details>`;
+    });
+  }
+
   async function renderPreview() {
     mermaidCounter = 0;
-    preview.innerHTML = marked.parse(editor.value);
+    preview.innerHTML = marked.parse(preprocessDetailsBlocks(editor.value));
     const wraps = preview.querySelectorAll('[data-mermaid-id]');
     if (!wraps.length) return;
     initMermaid();
@@ -4929,12 +4984,75 @@ if (!Array.prototype.findLastIndex) {
   }
   ['keyup','click','select'].forEach(ev=>editor.addEventListener(ev,updateStatus));
 
+  // ── Undo / Redo ──────────────────────────────────────────────────
+  let undoStack = [];
+  let redoStack = [];
+  let undoTimer = null;
+
+  function captureState() {
+    return { value: editor.value, ss: editor.selectionStart, se: editor.selectionEnd };
+  }
+  function saveHistory() {
+    const cur = captureState();
+    const last = undoStack[undoStack.length - 1];
+    if (last && last.value === cur.value) return;
+    undoStack.push(cur);
+    redoStack = [];
+    if (undoStack.length > 200) undoStack.shift();
+  }
+  // ツールバー操作の直前に呼ぶ（即時スナップショット）
+  function historySnapshot() {
+    clearTimeout(undoTimer);
+    saveHistory();
+  }
+  // キー入力時はデバウンスで保存
+  function scheduleHistorySave() {
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(saveHistory, 600);
+  }
+  function doUndo() {
+    clearTimeout(undoTimer);
+    const cur = captureState();
+    const last = undoStack[undoStack.length - 1];
+    if (!last || last.value !== cur.value) {
+      // 現在の状態がスタック未保存なら redo に積む
+      redoStack.push(cur);
+    } else {
+      if (undoStack.length <= 1) return;
+      redoStack.push(undoStack.pop());
+    }
+    const prev = undoStack[undoStack.length - 1];
+    if (!prev) return;
+    editor.value = prev.value;
+    editor.setSelectionRange(prev.ss, prev.se);
+    refresh();
+  }
+  function doRedo() {
+    if (!redoStack.length) return;
+    clearTimeout(undoTimer);
+    const cur = captureState();
+    const last = undoStack[undoStack.length - 1];
+    if (!last || last.value !== cur.value) undoStack.push(cur);
+    const next = redoStack.pop();
+    undoStack.push(next);
+    editor.value = next.value;
+    editor.setSelectionRange(next.ss, next.se);
+    refresh();
+  }
+  function resetHistory() {
+    undoStack = [captureState()];
+    redoStack = [];
+  }
+
   // ── Editor ───────────────────────────────────────────────────────
   function refresh() { updateLineNumbers(); updateStatus(); scheduleRender(); }
-  editor.addEventListener('input', refresh);
+  editor.addEventListener('input', () => { scheduleHistorySave(); refresh(); });
   editor.addEventListener('keydown', e => {
-    if (e.key==='Tab') { e.preventDefault(); const s=editor.selectionStart,end=editor.selectionEnd; editor.value=editor.value.substring(0,s)+'  '+editor.value.substring(end); editor.selectionStart=editor.selectionEnd=s+2; refresh(); }
+    if (e.key==='Tab') { e.preventDefault(); historySnapshot(); const s=editor.selectionStart,end=editor.selectionEnd; editor.value=editor.value.substring(0,s)+'  '+editor.value.substring(end); editor.selectionStart=editor.selectionEnd=s+2; refresh(); }
     if (e.ctrlKey||e.metaKey) {
+      if (e.key==='z'&&!e.shiftKey){e.preventDefault();doUndo();return;}
+      if (e.key==='z'&&e.shiftKey){e.preventDefault();doRedo();return;}
+      if (e.key==='y'){e.preventDefault();doRedo();return;}
       if (e.key==='b'){e.preventDefault();insert('bold');}
       if (e.key==='i'){e.preventDefault();insert('italic');}
       if (e.key==='s'){e.preventDefault();saveFile();}
@@ -4946,18 +5064,21 @@ if (!Array.prototype.findLastIndex) {
 
   // ── Insert helpers ───────────────────────────────────────────────
   function wrapSelection(b,a,ph) {
+    historySnapshot();
     const s=editor.selectionStart,e=editor.selectionEnd,sel=editor.value.substring(s,e)||ph;
     editor.value=editor.value.substring(0,s)+b+sel+a+editor.value.substring(e);
     editor.selectionStart=s+b.length; editor.selectionEnd=s+b.length+sel.length;
     editor.focus(); refresh();
   }
   function insertLine(prefix) {
+    historySnapshot();
     const s=editor.selectionStart,val=editor.value,ls=val.lastIndexOf('\n',s-1)+1,le=val.indexOf('\n',s),line=val.substring(ls,le===-1?val.length:le);
     editor.value=val.substring(0,ls)+prefix+line+val.substring(le===-1?val.length:le);
     editor.selectionStart=editor.selectionEnd=ls+prefix.length+line.length;
     editor.focus(); refresh();
   }
   function insertBlock(text, co) {
+    historySnapshot();
     const s=editor.selectionStart,val=editor.value,pre=(s>0&&val[s-1]!=='\n')?'\n\n':(s>0&&val[s-2]!=='\n')?'\n':'',full=pre+text;
     editor.value=val.substring(0,s)+full+val.substring(s);
     editor.selectionStart=editor.selectionEnd=s+pre.length+(co!==undefined?co:text.length);
@@ -4986,7 +5107,7 @@ if (!Array.prototype.findLastIndex) {
   // ── File ops ─────────────────────────────────────────────────────
   window.newFile = function() {
     if (editor.value&&!confirm('現在の内容を破棄して新規ファイルを作成しますか？')) return;
-    editor.value=''; currentFilename='untitled.md'; currentFileHandle=null; filenameDisplay.textContent=currentFilename; refresh(); showToast('新規ファイルを作成しました');
+    editor.value=''; currentFilename='untitled.md'; currentFileHandle=null; filenameDisplay.textContent=currentFilename; resetHistory(); refresh(); showToast('新規ファイルを作成しました');
   };
   window.openFile = async function() {
     if (window.showOpenFilePicker) {
@@ -4995,7 +5116,7 @@ if (!Array.prototype.findLastIndex) {
         const file = await handle.getFile();
         const text = await file.text();
         currentFileHandle = handle; currentFilename = file.name; filenameDisplay.textContent = currentFilename;
-        editor.value = text; refresh(); showToast(`"${file.name}" を開きました`);
+        editor.value = text; resetHistory(); refresh(); showToast(`"${file.name}" を開きました`);
       } catch(e) { if (e.name !== 'AbortError') throw e; }
     } else {
       document.getElementById('file-input').click();
@@ -5004,7 +5125,7 @@ if (!Array.prototype.findLastIndex) {
   document.getElementById('file-input').addEventListener('change', function(e) {
     const file=e.target.files[0]; if (!file) return;
     currentFileHandle = null;
-    const r=new FileReader(); r.onload=ev=>{ editor.value=ev.target.result; currentFilename=file.name; filenameDisplay.textContent=currentFilename; refresh(); showToast(`"${file.name}" を開きました`); }; r.readAsText(file,'UTF-8'); this.value='';
+    const r=new FileReader(); r.onload=ev=>{ editor.value=ev.target.result; currentFilename=file.name; filenameDisplay.textContent=currentFilename; resetHistory(); refresh(); showToast(`"${file.name}" を開きました`); }; r.readAsText(file,'UTF-8'); this.value='';
   });
   window.saveFile = async function() {
     if (currentFileHandle) {
@@ -5026,6 +5147,56 @@ if (!Array.prototype.findLastIndex) {
     const blob=new Blob([editor.value],{type:'text/markdown;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
     a.href=url; a.download=currentFilename; a.click(); URL.revokeObjectURL(url); showToast(`"${currentFilename}" を保存しました`);
   };
+
+  // ── Font size ────────────────────────────────────────────────────
+  let editorFontSize = parseInt(localStorage.getItem('md-font-size')) || 13;
+  (function initFontSize() {
+    editor.style.fontSize = editorFontSize + 'px';
+    document.getElementById('font-size-display').textContent = editorFontSize;
+  })();
+  window.changeFontSize = function(delta) {
+    editorFontSize = Math.max(10, Math.min(24, editorFontSize + delta));
+    editor.style.fontSize = editorFontSize + 'px';
+    document.getElementById('font-size-display').textContent = editorFontSize;
+    localStorage.setItem('md-font-size', editorFontSize);
+    updateLineNumbers();
+  };
+
+  // ── Sync scroll ──────────────────────────────────────────────────
+  let syncScrollEnabled = localStorage.getItem('md-sync-scroll') !== 'false';
+  let editorScrolling = false, previewScrolling = false;
+  (function initSyncScroll() {
+    const btn = document.getElementById('sync-scroll-btn');
+    btn.classList.toggle('sync-on', syncScrollEnabled);
+    btn.title = `同期スクロール (${syncScrollEnabled ? '有効' : '無効'})`;
+  })();
+  window.toggleSyncScroll = function() {
+    syncScrollEnabled = !syncScrollEnabled;
+    localStorage.setItem('md-sync-scroll', syncScrollEnabled);
+    const btn = document.getElementById('sync-scroll-btn');
+    btn.classList.toggle('sync-on', syncScrollEnabled);
+    btn.title = `同期スクロール (${syncScrollEnabled ? '有効' : '無効'})`;
+    showToast(`同期スクロール: ${syncScrollEnabled ? '有効' : '無効'}`);
+  };
+  editor.addEventListener('scroll', () => {
+    if (!syncScrollEnabled || previewScrolling) return;
+    editorScrolling = true;
+    const ratio = editor.scrollTop / Math.max(1, editor.scrollHeight - editor.clientHeight);
+    preview.scrollTop = ratio * Math.max(0, preview.scrollHeight - preview.clientHeight);
+    clearTimeout(editor._scrollTimer);
+    editor._scrollTimer = setTimeout(() => { editorScrolling = false; }, 80);
+  });
+  preview.addEventListener('scroll', () => {
+    if (!syncScrollEnabled || editorScrolling) return;
+    previewScrolling = true;
+    const ratio = preview.scrollTop / Math.max(1, preview.scrollHeight - preview.clientHeight);
+    editor.scrollTop = ratio * Math.max(0, editor.scrollHeight - editor.clientHeight);
+    clearTimeout(preview._scrollTimer);
+    preview._scrollTimer = setTimeout(() => { previewScrolling = false; }, 80);
+  });
+
+  // ── Print / PDF ──────────────────────────────────────────────────
+  window.printPreview = function() { window.print(); };
 
   // ── Toast ────────────────────────────────────────────────────────
   let toastTimer;
@@ -5089,7 +5260,10 @@ if (!Array.prototype.findLastIndex) {
   spSearch.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();spMove(e.shiftKey?-1:1);}if(e.key==='Escape')closeSearchPanel();if(e.altKey&&e.key==='c'){e.preventDefault();window.spToggle('case');}if(e.altKey&&e.key==='r'){e.preventDefault();window.spToggle('regex');}});
   spReplace.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.spReplaceOne();}if(e.key==='Escape')closeSearchPanel();});
   editor.addEventListener('input',()=>{if(spPanel.classList.contains('open'))spRunSearch();});
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();openSearchPanel();const sel=editor.value.substring(editor.selectionStart,editor.selectionEnd);if(sel&&sel.length<200)spSearch.value=sel;spRunSearch();}});
+  document.addEventListener('keydown',e=>{
+    if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();openSearchPanel();const sel=editor.value.substring(editor.selectionStart,editor.selectionEnd);if(sel&&sel.length<200)spSearch.value=sel;spRunSearch();}
+    if((e.ctrlKey||e.metaKey)&&e.key==='p'){e.preventDefault();window.printPreview();}
+  });
 
   // ── Initial content ──────────────────────────────────────────────
   editor.value = `# Markdown Editor へようこそ 🎉
@@ -5130,6 +5304,7 @@ console.log(greet("World"));
 
 > **Tip:** \`Ctrl+S\` で保存、\`Ctrl+F\` で検索、図にホバーでコピーボタン表示。
 `;
+  resetHistory();
   updateLineNumbers(); updateStatus(); renderPreview();
 })();
 </script>
