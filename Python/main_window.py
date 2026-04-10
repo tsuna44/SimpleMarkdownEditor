@@ -143,6 +143,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QFileDialog, QLabel,
     QMessageBox, QSizePolicy, QToolBar,
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
+    QTreeView, QFileSystemModel,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
@@ -275,6 +276,60 @@ class OutlinePanel(QWidget):
     def _onItemClicked(self, item: QListWidgetItem):
         self.jumpTo.emit(item.data(Qt.ItemDataRole.UserRole))
 
+
+# ── File tree panel ───────────────────────────────────────────────────────────
+
+class FileTreePanel(QWidget):
+    """File tree panel — shows .md/.markdown/.txt files in a directory."""
+
+    openFile = Signal(str)  # emitted with absolute path when a file is double-clicked
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        lbl = QLabel("FILES")
+        lbl.setObjectName("pane-label")
+        lbl.setFixedHeight(18)
+        lay.addWidget(lbl)
+
+        self._model = QFileSystemModel()
+        self._model.setNameFilters(["*.md", "*.markdown", "*.txt"])
+        self._model.setNameFilterDisables(False)  # hide non-matching files
+
+        self._tree = QTreeView()
+        self._tree.setObjectName("file-tree")
+        self._tree.setModel(self._model)
+        self._tree.setFrameShape(QTreeView.Shape.NoFrame)
+        self._tree.setHeaderHidden(True)
+        for col in range(1, 4):  # hide size / type / date columns
+            self._tree.hideColumn(col)
+        self._tree.setAnimated(False)
+        self._tree.setIndentation(16)
+        self._tree.doubleClicked.connect(self._onDoubleClicked)
+        lay.addWidget(self._tree)
+
+        self._root_path = ""
+        self.setRootPath(str(Path.home()))
+
+    def setRootPath(self, path: str):
+        """Change the root directory shown in the tree."""
+        p = Path(path)
+        if not p.is_dir() or str(p) == self._root_path:
+            return
+        self._root_path = str(p)
+        self._model.setRootPath(self._root_path)
+        self._tree.setRootIndex(self._model.index(self._root_path))
+
+    def _onDoubleClicked(self, index):
+        path = self._model.filePath(index)
+        if Path(path).is_file():
+            self.openFile.emit(path)
+
+
+_RECENT_MAX = 10
 
 _DEFAULT_MD = """\
 # Simple Markdown Editor
@@ -614,6 +669,95 @@ if (typeof mermaid !== 'undefined') {{
             )
         self.editor.setFocus()
 
+    # ── table format
+
+    def formatTable(self):
+        """Align the Markdown table that contains the cursor."""
+        doc = self.editor.document()
+        cursor = self.editor.textCursor()
+
+        # Walk backward to the first row of the table
+        b = cursor.block()
+        while b.isValid() and re.match(r'^\s*\|', b.text()):
+            b = b.previous()
+        start_block = b.next() if b.isValid() and not re.match(r'^\s*\|', b.text()) else b
+
+        if not start_block.isValid() or not re.match(r'^\s*\|', start_block.text()):
+            return  # cursor is not inside a table
+
+        # Walk forward to the last row of the table
+        b = start_block
+        while b.isValid() and re.match(r'^\s*\|', b.text()):
+            b = b.next()
+        end_block = b.previous()
+
+        if start_block.blockNumber() > end_block.blockNumber():
+            return
+
+        # Collect raw rows
+        rows, b = [], start_block
+        while b.isValid() and b.blockNumber() <= end_block.blockNumber():
+            rows.append(b.text())
+            b = b.next()
+
+        def parse_row(line: str):
+            line = line.strip()
+            if line.startswith('|'):
+                line = line[1:]
+            if line.endswith('|'):
+                line = line[:-1]
+            return [cell.strip() for cell in line.split('|')]
+
+        parsed = [parse_row(r) for r in rows]
+        num_cols = max(len(r) for r in parsed)
+        for r in parsed:
+            while len(r) < num_cols:
+                r.append('')
+
+        # Detect separator row (index 1) and compute column widths
+        def is_sep_cell(s: str) -> bool:
+            return bool(re.match(r'^:?-+:?$', s)) or s == ''
+
+        sep_idx = 1 if len(parsed) > 1 and all(is_sep_cell(c) for c in parsed[1]) else -1
+
+        col_widths = [3] * num_cols  # minimum 3 chars
+        for ri, r in enumerate(parsed):
+            for ci, cell in enumerate(r):
+                if ri == sep_idx:
+                    continue
+                col_widths[ci] = max(col_widths[ci], len(cell))
+
+        # Rebuild rows with padding
+        new_rows = []
+        for ri, r in enumerate(parsed):
+            cells = []
+            for ci, cell in enumerate(r):
+                w = col_widths[ci]
+                if ri == sep_idx:
+                    c_str = cell if cell else '-' * w
+                    if c_str.startswith(':') and c_str.endswith(':'):
+                        cells.append(':' + '-' * (w - 2) + ':')
+                    elif c_str.startswith(':'):
+                        cells.append(':' + '-' * (w - 1))
+                    elif c_str.endswith(':'):
+                        cells.append('-' * (w - 1) + ':')
+                    else:
+                        cells.append('-' * w)
+                else:
+                    cells.append(cell.ljust(w))
+            new_rows.append('| ' + ' | '.join(cells) + ' |')
+
+        # Replace the table text in the document
+        tc = self.editor.textCursor()
+        tc.setPosition(start_block.position())
+        tc.setPosition(
+            end_block.position() + end_block.length() - 1,
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        tc.insertText('\n'.join(new_rows))
+        self.editor.setTextCursor(tc)
+        self.editor.setFocus()
+
     # ── search
 
     def showSearch(self):
@@ -660,6 +804,9 @@ class MarkdownEditor(QMainWindow):
         self._settings = QSettings(
             str(config_dir / "settings.ini"), QSettings.Format.IniFormat)
         self._last_dir = self._settings.value("last_dir", str(Path.home()))
+        self._recent_files: list[str] = json.loads(
+            self._settings.value("recent_files", "[]")
+        )
 
         self._outline_timer = QTimer(singleShot=True, interval=300)
 
@@ -720,6 +867,20 @@ class MarkdownEditor(QMainWindow):
         self._outline_dock.hide()
         self._outline_timer.timeout.connect(self._updateOutline)
 
+        # File tree dock (left side, hidden by default)
+        self._file_tree = FileTreePanel()
+        self._file_tree.openFile.connect(self._openOrSwitchToFile)
+        self._file_tree_dock = QDockWidget(self)
+        self._file_tree_dock.setObjectName("filetree-dock")
+        self._file_tree_dock.setTitleBarWidget(QWidget(self._file_tree_dock))
+        self._file_tree_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self._file_tree_dock.setWidget(self._file_tree)
+        self._file_tree_dock.setMinimumWidth(200)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._file_tree_dock)
+        self._file_tree_dock.hide()
+
         # Tab widget
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -761,6 +922,10 @@ class MarkdownEditor(QMainWindow):
         file_menu = QMenu(self)
         file_menu.addAction("📄  New Tab",   self._newTab).setShortcut(QKeySequence("Ctrl+T"))
         file_menu.addAction("📂  Open",      self._openFile).setShortcut(QKeySequence("Ctrl+O"))
+        # Recent files submenu — populated dynamically when the menu opens
+        self._recent_menu = QMenu("🕐  最近使ったファイル", file_menu)
+        file_menu.addMenu(self._recent_menu)
+        self._recent_menu.aboutToShow.connect(self._buildRecentMenu)
         file_menu.addSeparator()
         file_menu.addAction("💾  Save",      self._saveFile).setShortcut(QKeySequence("Ctrl+S"))
         file_menu.addAction("💾  Save As…",  self._saveFileAs)
@@ -781,6 +946,7 @@ class MarkdownEditor(QMainWindow):
         self._themeAct = act(tb1, "☀", "テーマ切り替え", self._toggleTheme)
         act(tb1, "🔍", "検索・置換 (Ctrl+F)", self._showSearch, "Ctrl+F")
         self._outlineAct = act(tb1, "≡", "アウトライン (Ctrl+Shift+O)", self._toggleOutline, "Ctrl+Shift+O")
+        self._filetreeAct = act(tb1, "📁", "ファイルツリー (Ctrl+Shift+F)", self._toggleFileTree, "Ctrl+Shift+F")
 
         tb1.addSeparator()
         act(tb1, "A−", "文字を小さく", self._fontSizeDown)
@@ -813,9 +979,10 @@ class MarkdownEditor(QMainWindow):
         act(tb2, "``` Code", "コードブロック",   lambda: self._insert("codeblock"))
         act(tb2, "Mermaid",  "Mermaid ダイアグラム",  lambda: self._insert("mermaid"))
         act(tb2, "PlantUML", "PlantUML ダイアグラム", lambda: self._insert("plantuml"))
-        act(tb2, "Table",    "テーブル",         lambda: self._insert("table"))
-        act(tb2, "Link",     "リンク (Ctrl+K)",  lambda: self._insert("link"),     "Ctrl+K")
-        act(tb2, "---",      "水平線",           lambda: self._insert("hr"))
+        act(tb2, "Table",    "テーブル",                    lambda: self._insert("table"))
+        act(tb2, "≡T",      "テーブル整形 (Ctrl+Shift+T)", self._formatTable, "Ctrl+Shift+T")
+        act(tb2, "Link",     "リンク (Ctrl+K)",             lambda: self._insert("link"), "Ctrl+K")
+        act(tb2, "---",      "水平線",                      lambda: self._insert("hr"))
 
     def _buildStatusBar(self):
         sb = self.statusBar()
@@ -883,6 +1050,7 @@ class MarkdownEditor(QMainWindow):
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
             self._updateStatus()
             self._updateOutline()
+            self._updateFileTreeRoot()
 
     def _newTab(self):
         self._addTab()
@@ -909,6 +1077,7 @@ class MarkdownEditor(QMainWindow):
             tab = self.tabs.widget(i)
             if tab and tab._file and str(Path(tab._file).resolve()) == abs_path:
                 self.tabs.setCurrentIndex(i)
+                self._addRecentFile(abs_path)
                 return
         # Reuse current tab if empty and unmodified
         cur = self._curTab()
@@ -918,6 +1087,7 @@ class MarkdownEditor(QMainWindow):
             cur.applyTheme(self._dark)
         else:
             self._addTab(file_path=abs_path)
+        self._addRecentFile(abs_path)
 
     def _setLastDir(self, path: str):
         self._last_dir = path
@@ -930,6 +1100,7 @@ class MarkdownEditor(QMainWindow):
         )
         for path in paths:
             self._setLastDir(str(Path(path).parent))
+            self._addRecentFile(path)
             # Reuse current tab if it is empty and unmodified
             tab = self._curTab()
             if tab and tab._file is None and not tab._modified \
@@ -960,6 +1131,7 @@ class MarkdownEditor(QMainWindow):
         )
         if path:
             self._setLastDir(str(Path(path).parent))
+            self._addRecentFile(path)
             tab._file = path
             tab.saveFile()
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
@@ -1126,6 +1298,56 @@ class MarkdownEditor(QMainWindow):
         if tab:
             tab.showSearch()
 
+    def _formatTable(self):
+        tab = self._curTab()
+        if tab:
+            tab.formatTable()
+
+    # ── Recent files
+
+    def _addRecentFile(self, path: str):
+        path = str(Path(path).resolve())
+        if path in self._recent_files:
+            self._recent_files.remove(path)
+        self._recent_files.insert(0, path)
+        self._recent_files = self._recent_files[:_RECENT_MAX]
+        self._settings.setValue("recent_files", json.dumps(self._recent_files))
+
+    def _clearRecentFiles(self):
+        self._recent_files.clear()
+        self._settings.setValue("recent_files", "[]")
+
+    def _buildRecentMenu(self):
+        self._recent_menu.clear()
+        valid = [p for p in self._recent_files if Path(p).exists()]
+        if not valid:
+            a = self._recent_menu.addAction("(なし)")
+            a.setEnabled(False)
+            return
+        for path in valid:
+            name = Path(path).name
+            a = self._recent_menu.addAction(name)
+            a.setToolTip(path)
+            a.triggered.connect(lambda checked, p=path: self._openOrSwitchToFile(p))
+        self._recent_menu.addSeparator()
+        self._recent_menu.addAction("履歴をクリア", self._clearRecentFiles)
+
+    # ── File tree
+
+    def _toggleFileTree(self):
+        if self._file_tree_dock.isVisible():
+            self._file_tree_dock.hide()
+        else:
+            self._file_tree_dock.show()
+            self._updateFileTreeRoot()
+
+    def _updateFileTreeRoot(self):
+        if not self._file_tree_dock.isVisible():
+            return
+        tab = self._curTab()
+        if tab and tab._file:
+            self._file_tree.setRootPath(str(Path(tab._file).parent))
+
     # ── Theme / font size
 
     def _toggleTheme(self):
@@ -1221,7 +1443,22 @@ class MarkdownEditor(QMainWindow):
                 font-size: 10px; padding: 0 4px;
             }}
             QSplitter::handle {{ background: {t["border"]}; width: 1px; }}
-            QDockWidget#outline-dock {{ border: none; }}
+            QDockWidget#outline-dock, QDockWidget#filetree-dock {{ border: none; }}
+            QTreeView#file-tree {{
+                background: {t["surface"]}; color: {t["text"]};
+                border: none; outline: none;
+                font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+                font-size: 11px;
+            }}
+            QTreeView#file-tree::item {{
+                padding: 2px 4px; border-radius: 3px;
+            }}
+            QTreeView#file-tree::item:selected {{
+                background: {t["accent"]}; color: #fff;
+            }}
+            QTreeView#file-tree::item:hover:!selected {{
+                background: {t["surface2"]}; color: {t["accent"]};
+            }}
             QListWidget#outline-list {{
                 background: {t["surface"]}; color: {t["text"]};
                 border: none; outline: none;
