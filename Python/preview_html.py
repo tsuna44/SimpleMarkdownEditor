@@ -276,6 +276,20 @@ def _shell_html(theme: dict, dark: bool) -> str:
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }}
 
+  // Intercept anchor-only links (#fragment) and smooth-scroll instead of navigating.
+  // This avoids a full page reload that would wipe the JS-injected content.
+  document.addEventListener('click', function(e) {{
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const fragment = a.getAttribute('href').slice(1);
+    if (!fragment) return;
+    const target = document.getElementById(fragment);
+    if (target) {{
+      e.preventDefault();
+      target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+    }}
+  }});
+
   function addDiagramActions(el, idx) {{
     if (el.dataset.actions) return;
     el.dataset.actions = '1';

@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 import markdown
+from markdown.extensions.toc import TocExtension, slugify_unicode
 
 # ── PlantUML command detection ───────────────────────────────────────────────
 
@@ -509,6 +510,7 @@ class EditorTab(QWidget):
                 'markdown.extensions.extra',
                 'markdown.extensions.codehilite',
                 'markdown.extensions.nl2br',
+                TocExtension(permalink=False, slugify=slugify_unicode),
             ],
             extension_configs={
                 'codehilite': {
