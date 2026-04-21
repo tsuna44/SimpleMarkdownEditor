@@ -41,19 +41,38 @@ def _load_versions() -> dict:
         return {}
 
 
+_JVM_MEM   = "1g"
+_PUML_SIZE = 32768
+
+
+def _jvm_opts() -> list[str]:
+    return [f"-Xmx{_JVM_MEM}", f"-DPLANTUML_LIMIT_SIZE={_PUML_SIZE}"]
+
+
+def _apply_puml_settings(mem: str, size: int):
+    global _JVM_MEM, _PUML_SIZE, _PUML_CANDIDATES, _PUML_CMD, _PUML_CHECKED
+    _JVM_MEM = mem
+    _PUML_SIZE = size
+    _PUML_CANDIDATES = _make_puml_candidates()
+    _PUML_CMD = None
+    _PUML_CHECKED = False
+
+
 def _make_puml_candidates() -> list[list[str]]:
     jar = str(_puml_jar_path())
+    def j(java: str, jar_path: str) -> list[str]:
+        return [java] + _jvm_opts() + ["-jar", jar_path]
     return [
         ["plantuml"],
         ["plantuml.sh"],
-        ["java", "-jar", jar],
-        ["/opt/homebrew/opt/openjdk/bin/java", "-jar", jar],
-        ["/usr/local/opt/openjdk/bin/java",    "-jar", jar],
-        ["java", "-jar", "/usr/local/opt/plantuml/libexec/plantuml.jar"],
-        ["java", "-jar", "/opt/homebrew/opt/plantuml/libexec/plantuml.jar"],
-        ["java", "-jar", "/usr/share/plantuml/plantuml.jar"],
-        ["java", "-jar", "/usr/share/java/plantuml.jar"],
-        ["java", "-jar", "/usr/local/share/plantuml/plantuml.jar"],
+        j("java", jar),
+        j("/opt/homebrew/opt/openjdk/bin/java", jar),
+        j("/usr/local/opt/openjdk/bin/java",    jar),
+        j("java", "/usr/local/opt/plantuml/libexec/plantuml.jar"),
+        j("java", "/opt/homebrew/opt/plantuml/libexec/plantuml.jar"),
+        j("java", "/usr/share/plantuml/plantuml.jar"),
+        j("java", "/usr/share/java/plantuml.jar"),
+        j("java", "/usr/local/share/plantuml/plantuml.jar"),
     ]
 
 
@@ -141,14 +160,15 @@ def _do_render_plantuml(src: str) -> str:
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QTabWidget,
-    QVBoxLayout, QFileDialog, QLabel,
+    QVBoxLayout, QHBoxLayout, QFileDialog, QLabel,
     QMessageBox, QSizePolicy, QToolBar,
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
-    QTreeView, QFileSystemModel,
+    QTreeView, QFileSystemModel, QDialog, QFormLayout, QComboBox,
+    QDialogButtonBox,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
-from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths
+from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths, QFileSystemWatcher
 from PySide6.QtGui import (
     QKeySequence, QTextCursor,
     QAction, QPageLayout, QPageSize,
@@ -402,9 +422,13 @@ class EditorTab(QWidget):
         self._font_size = font_size
         self._tmp_html = None     # str | None  (temp file for preview)
         self._search_dlg = None   # SearchDialog | None
+        self._saving = False      # True while we are writing the file ourselves
 
         self._preview_timer = QTimer(singleShot=True, interval=300)
         self._preview_timer.timeout.connect(self._updatePreview)
+
+        self._watcher = QFileSystemWatcher()
+        self._watcher.fileChanged.connect(self._onExternalFileChange)
 
         self._buildUI()
 
@@ -605,21 +629,48 @@ if (typeof mermaid !== 'undefined') {{
     def loadFile(self, path: str):
         with open(path, encoding='utf-8') as f:
             content = f.read()
+        if self._file and self._file in self._watcher.files():
+            self._watcher.removePath(self._file)
         self._file = path
         self._modified = False
         self.editor.setPlainText(content)
         self._modified = False
+        self._watcher.addPath(path)
         self._refreshTitle()
 
     def saveFile(self) -> bool:
         """Save to current path. Returns False if no path is set."""
         if not self._file:
             return False
+        self._saving = True
         with open(self._file, 'w', encoding='utf-8') as f:
             f.write(self.editor.toPlainText())
+        self._saving = False
+        # Some editors replace the file (unlink + create), re-add after save
+        if self._file not in self._watcher.files():
+            self._watcher.addPath(self._file)
         self._modified = False
         self._refreshTitle()
         return True
+
+    def _onExternalFileChange(self, path: str):
+        if self._saving:
+            return
+        if not Path(path).exists():
+            return
+        # Re-add path in case the editor replaced the file inode
+        if path not in self._watcher.files():
+            self._watcher.addPath(path)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        cursor_pos = self.editor.textCursor().position()
+        self._modified = False
+        self.editor.setPlainText(content)
+        self._modified = False
+        cursor = self.editor.textCursor()
+        cursor.setPosition(min(cursor_pos, len(content)))
+        self.editor.setTextCursor(cursor)
+        self._refreshTitle()
 
     # ── insert
 
@@ -809,6 +860,10 @@ class MarkdownEditor(QMainWindow):
         self._recent_files: list[str] = json.loads(
             self._settings.value("recent_files", "[]")
         )
+        _apply_puml_settings(
+            self._settings.value("puml_jvm_mem",   "1g"),
+            int(self._settings.value("puml_limit_size", 32768)),
+        )
 
         self._outline_timer = QTimer(singleShot=True, interval=300)
 
@@ -936,6 +991,8 @@ class MarkdownEditor(QMainWindow):
         file_menu.addAction("🖨  Print…",      self._printDoc).setShortcut(QKeySequence("Ctrl+P"))
         file_menu.addSeparator()
         file_menu.addAction("✖  Close Tab",  self._closeCurrentTab).setShortcut(QKeySequence("Ctrl+W"))
+        file_menu.addSeparator()
+        file_menu.addAction("⚙  Settings…",  self._showSettings)
 
         self._file_btn = QToolButton()
         self._file_btn.setText("File ▾")
@@ -995,21 +1052,64 @@ class MarkdownEditor(QMainWindow):
         versions = _load_versions()
         mermaid_ver = versions.get("mermaid", "?")
         plantuml_ver = versions.get("plantuml", "?")
+        elk_ver = versions.get("elkjs", "?")
         import PySide6
         py_ver = ".".join(str(v) for v in sys.version_info[:3])
         ps6_ver = PySide6.__version__
-        badge = QLabel(f"mermaid v{mermaid_ver}  |  plantuml v{plantuml_ver}")
-        badge.setObjectName("badge")
-        badge.setToolTip(
+        ver_badge = QLabel(f"mermaid v{mermaid_ver}  |  elkjs v{elk_ver}  |  plantuml v{plantuml_ver}")
+        ver_badge.setObjectName("ver-badge")
+        ver_badge.setToolTip(
             f"Python {py_ver}  |  PySide6 {ps6_ver}\n"
-            f"mermaid {mermaid_ver}  |  plantuml {plantuml_ver}"
+            f"mermaid {mermaid_ver}  |  elkjs {elk_ver}  |  plantuml {plantuml_ver}"
         )
+        app_badge = QLabel("● Standalone")
+        app_badge.setObjectName("app-badge")
         sb.addWidget(self._lnColLbl)
         sb.addWidget(QLabel("|"))
         sb.addWidget(self._wordsLbl)
         sb.addWidget(QLabel("|"))
         sb.addWidget(self._charsLbl)
-        sb.addPermanentWidget(badge)
+        sb.addPermanentWidget(ver_badge)
+        sb.addPermanentWidget(app_badge)
+
+    # ── Settings dialog
+
+    def _showSettings(self):
+        MEM_OPTIONS  = ["512m", "1g", "2g", "4g"]
+        SIZE_OPTIONS = [4096, 8192, 16384, 32768, 65536]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Settings — PlantUML")
+        dlg.setMinimumWidth(320)
+        form = QFormLayout(dlg)
+
+        mem_box = QComboBox()
+        mem_box.addItems(MEM_OPTIONS)
+        mem_box.setCurrentText(_JVM_MEM if _JVM_MEM in MEM_OPTIONS else "1g")
+        form.addRow("JVM ヒープメモリ (-Xmx):", mem_box)
+
+        size_box = QComboBox()
+        for s in SIZE_OPTIONS:
+            size_box.addItem(str(s), s)
+        cur_idx = size_box.findData(_PUML_SIZE)
+        if cur_idx >= 0:
+            size_box.setCurrentIndex(cur_idx)
+        form.addRow("図サイズ上限 (px):", size_box)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        mem  = mem_box.currentText()
+        size = size_box.currentData()
+        _apply_puml_settings(mem, size)
+        self._settings.setValue("puml_jvm_mem",    mem)
+        self._settings.setValue("puml_limit_size", size)
 
     # ── Tab management
 
@@ -1431,7 +1531,11 @@ class MarkdownEditor(QMainWindow):
                 font-family: 'JetBrains Mono', monospace;
                 font-size: 11px; color: {t["text2"]};
             }}
-            QStatusBar#statusbar QLabel#badge {{
+            QStatusBar#statusbar QLabel#ver-badge {{
+                background: #3a5a3a; color: #c8e6c8;
+                font-size: 10px; padding: 2px 8px; border-radius: 10px;
+            }}
+            QStatusBar#statusbar QLabel#app-badge {{
                 background: #2a5a8a; color: #fff;
                 font-size: 10px; padding: 2px 8px; border-radius: 10px;
             }}
