@@ -252,7 +252,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
 
   async function copyAsPng(svg, btn, scaleSelect) {{
     const orig = btn.textContent;
-    const scale = parseFloat(scaleSelect.value) || 4;
+    const scale = parseFloat(scaleSelect.value) || 2;
     try {{
       const dataUrl = await svgToPngDataUrl(svg, scale);
       const res   = await fetch(dataUrl);
@@ -304,7 +304,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
     for (const [label, val] of [['1×', '1'], ['2×', '2'], ['4×', '4'], ['8×', '8']]) {{
       const opt = document.createElement('option');
       opt.value = val; opt.textContent = label;
-      if (val === '4') opt.selected = true;
+      if (val === '2') opt.selected = true;
       scaleSelect.appendChild(opt);
     }}
     const pngBtn = document.createElement('button');
