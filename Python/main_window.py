@@ -41,18 +41,23 @@ def _load_versions() -> dict:
         return {}
 
 
-_JVM_MEM   = "1g"
-_PUML_SIZE = 32768
+_JVM_MEM          = "1g"
+_PUML_SIZE        = 32768
+_PUML_RENDER_MODE = "auto"   # "auto" | "manual"
+_PNG_DEFAULT_SCALE = 2       # 1 | 2 | 4 | 8
 
 
 def _jvm_opts() -> list[str]:
     return [f"-Xmx{_JVM_MEM}", f"-DPLANTUML_LIMIT_SIZE={_PUML_SIZE}"]
 
 
-def _apply_puml_settings(mem: str, size: int):
-    global _JVM_MEM, _PUML_SIZE, _PUML_CANDIDATES, _PUML_CMD, _PUML_CHECKED
+def _apply_puml_settings(mem: str, size: int, render_mode: str = "auto", png_scale: int = 2):
+    global _JVM_MEM, _PUML_SIZE, _PUML_RENDER_MODE, _PNG_DEFAULT_SCALE
+    global _PUML_CANDIDATES, _PUML_CMD, _PUML_CHECKED
     _JVM_MEM = mem
     _PUML_SIZE = size
+    _PUML_RENDER_MODE = render_mode
+    _PNG_DEFAULT_SCALE = png_scale
     _PUML_CANDIDATES = _make_puml_candidates()
     _PUML_CMD = None
     _PUML_CHECKED = False
@@ -495,16 +500,19 @@ class EditorTab(QWidget):
     def _onTextChanged(self):
         self._modified = True
         self._refreshTitle()
-        text = self.editor.toPlainText()
-        has_uncached_puml = bool(re.search(r'```plantuml\n', text)) and any(
-            _normalize_puml(m.group(1)) not in _PUML_CACHE
-            for m in re.finditer(r'```plantuml\n(.*?)```', text, re.DOTALL)
-        )
-        self._preview_timer.start(800 if has_uncached_puml else 300)
+        if _PUML_RENDER_MODE == "auto":
+            text = self.editor.toPlainText()
+            has_uncached_puml = bool(re.search(r'```plantuml\n', text)) and any(
+                _normalize_puml(m.group(1)) not in _PUML_CACHE
+                for m in re.finditer(r'```plantuml\n(.*?)```', text, re.DOTALL)
+            )
+            self._preview_timer.start(800 if has_uncached_puml else 300)
+        else:
+            self._preview_timer.start(300)
 
     # ── Markdown → HTML
 
-    def _mdToHtml(self, text: str) -> str:
+    def _mdToHtml(self, text: str, force_puml: bool = False) -> str:
         text = re.sub(r'~~(.+?)~~', r'<del>\1</del>', text)
 
         # Auto-inject markdown="1" on <details> so the md_in_html extension
@@ -524,6 +532,11 @@ class EditorTab(QWidget):
         text = re.sub(r'```mermaid\n(.*?)```', mermaid_block, text, flags=re.DOTALL)
 
         def plantuml_block(m):
+            if _PUML_RENDER_MODE == "manual" and not force_puml:
+                src = _normalize_puml(m.group(1))
+                if src in _PUML_CACHE:
+                    return f'\n<div class="plantuml">{_PUML_CACHE[src]}</div>\n'
+                return '\n<div class="plantuml-pending">⏸ PlantUML — ツールバーの「▶ Render」ボタンを押して図を生成</div>\n'
             svg_or_err = _render_plantuml_svg(m.group(1))
             return f'\n<div class="plantuml">{svg_or_err}</div>\n'
         text = re.sub(r'```plantuml\n(.*?)```', plantuml_block, text, flags=re.DOTALL)
@@ -550,7 +563,7 @@ class EditorTab(QWidget):
     def reloadPreview(self):
         """Write shell HTML to a temp file and load via file://."""
         t = DARK if self._dark else LIGHT
-        html = _shell_html(t, self._dark)
+        html = _shell_html(t, self._dark, _PNG_DEFAULT_SCALE)
         if self._tmp_html is None:
             fd, path = tempfile.mkstemp(suffix='.html', prefix='md_preview_')
             os.close(fd)
@@ -575,8 +588,8 @@ class EditorTab(QWidget):
             # Navigation error — reload the shell and re-render current content
             QTimer.singleShot(0, self.reloadPreview)
 
-    def _updatePreview(self):
-        body_html = self._mdToHtml(self.editor.toPlainText())
+    def _updatePreview(self, force_puml: bool = False):
+        body_html = self._mdToHtml(self.editor.toPlainText(), force_puml=force_puml)
         js_string = json.dumps(body_html)
         self.preview.page().runJavaScript(f"""\
 document.getElementById('content').innerHTML = {js_string};
@@ -861,8 +874,10 @@ class MarkdownEditor(QMainWindow):
             self._settings.value("recent_files", "[]")
         )
         _apply_puml_settings(
-            self._settings.value("puml_jvm_mem",   "1g"),
+            self._settings.value("puml_jvm_mem",      "1g"),
             int(self._settings.value("puml_limit_size", 32768)),
+            self._settings.value("puml_render_mode",  "auto"),
+            int(self._settings.value("png_default_scale", 2)),
         )
 
         self._outline_timer = QTimer(singleShot=True, interval=300)
@@ -1038,6 +1053,10 @@ class MarkdownEditor(QMainWindow):
         act(tb2, "``` Code", "コードブロック",   lambda: self._insert("codeblock"))
         act(tb2, "Mermaid",  "Mermaid ダイアグラム",  lambda: self._insert("mermaid"))
         act(tb2, "PlantUML", "PlantUML ダイアグラム", lambda: self._insert("plantuml"))
+        tb2.addSeparator()
+        self._puml_render_btn = act(tb2, "▶ Render", "PlantUML を今すぐレンダリング (手動モード)", self._renderPuml)
+        self._puml_render_btn.setVisible(_PUML_RENDER_MODE == "manual")
+        tb2.addSeparator()
         act(tb2, "Table",    "テーブル",                    lambda: self._insert("table"))
         act(tb2, "≡T",      "テーブル整形 (Ctrl+Shift+T)", self._formatTable, "Ctrl+Shift+T")
         act(tb2, "Link",     "リンク (Ctrl+K)",             lambda: self._insert("link"), "Ctrl+K")
@@ -1072,6 +1091,14 @@ class MarkdownEditor(QMainWindow):
         sb.addPermanentWidget(ver_badge)
         sb.addPermanentWidget(app_badge)
 
+    # ── PlantUML manual render
+
+    def _renderPuml(self):
+        _PUML_CACHE.clear()
+        tab = self._curTab()
+        if tab:
+            tab._updatePreview(force_puml=True)
+
     # ── Settings dialog
 
     def _showSettings(self):
@@ -1096,6 +1123,22 @@ class MarkdownEditor(QMainWindow):
             size_box.setCurrentIndex(cur_idx)
         form.addRow("図サイズ上限 (px):", size_box)
 
+        mode_box = QComboBox()
+        mode_box.addItem("自動（編集時に自動レンダリング）", "auto")
+        mode_box.addItem("手動（▶ Render ボタン押下時のみ）", "manual")
+        cur_mode_idx = mode_box.findData(_PUML_RENDER_MODE)
+        if cur_mode_idx >= 0:
+            mode_box.setCurrentIndex(cur_mode_idx)
+        form.addRow("レンダリングモード:", mode_box)
+
+        png_box = QComboBox()
+        for label, val in [("1×（等倍）", 1), ("2×（デフォルト）", 2), ("4×（高解像度）", 4), ("8×（最高解像度）", 8)]:
+            png_box.addItem(label, val)
+        cur_png_idx = png_box.findData(_PNG_DEFAULT_SCALE)
+        if cur_png_idx >= 0:
+            png_box.setCurrentIndex(cur_png_idx)
+        form.addRow("PNG デフォルト解像度:", png_box)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(dlg.accept)
@@ -1105,11 +1148,20 @@ class MarkdownEditor(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        mem  = mem_box.currentText()
-        size = size_box.currentData()
-        _apply_puml_settings(mem, size)
-        self._settings.setValue("puml_jvm_mem",    mem)
-        self._settings.setValue("puml_limit_size", size)
+        mem       = mem_box.currentText()
+        size      = size_box.currentData()
+        mode      = mode_box.currentData()
+        png_scale = png_box.currentData()
+        _apply_puml_settings(mem, size, mode, png_scale)
+        self._settings.setValue("puml_jvm_mem",      mem)
+        self._settings.setValue("puml_limit_size",   size)
+        self._settings.setValue("puml_render_mode",  mode)
+        self._settings.setValue("png_default_scale", png_scale)
+        self._puml_render_btn.setVisible(mode == "manual")
+        # Update the JS global in all open tabs without reloading the page
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            tab.preview.page().runJavaScript(f"window._defaultPngScale = {png_scale};")
 
     # ── Tab management
 

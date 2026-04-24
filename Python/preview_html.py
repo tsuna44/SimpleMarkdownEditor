@@ -32,7 +32,7 @@ def _mermaid_script_tag() -> str:
     return '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
 
 
-def _shell_html(theme: dict, dark: bool) -> str:
+def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
     """Static page loaded once per theme. Content is updated via innerHTML."""
     t = theme
     # Pygments CSS for syntax highlighting
@@ -102,6 +102,13 @@ def _shell_html(theme: dict, dark: bool) -> str:
     font-size: .9em;
   }}
   .plantuml-error code {{ background: transparent; color: inherit; }}
+  .plantuml-pending {{
+    margin: 1em 0; padding: 12px 16px;
+    background: {"#1e2a1e" if dark else "#f0f8f0"};
+    border: 1px solid {"#3a5a3a" if dark else "#a0c8a0"};
+    border-radius: 6px; color: {"#80b880" if dark else "#5a8a5a"};
+    font-size: .9em; text-align: center;
+  }}
   .diagram-actions {{
     position: absolute; bottom: 8px; right: 8px;
     display: flex; gap: 6px;
@@ -191,6 +198,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
   const _mermaidTheme = '{"dark" if dark else "default"}';
   const BASE_FONT_SIZE = 14;
   let _currentFontSize = BASE_FONT_SIZE;
+  window._defaultPngScale = {png_default_scale};
 
   function _initMermaid() {{
     mermaid.initialize({{ startOnLoad: false, theme: _mermaidTheme }});
@@ -292,19 +300,20 @@ def _shell_html(theme: dict, dark: bool) -> str:
 
   function addDiagramActions(el, idx) {{
     if (el.dataset.actions) return;
-    el.dataset.actions = '1';
     const svg = el.querySelector('svg');
-    if (!svg) return;
+    if (!svg) return;  // SVG not ready yet (Mermaid async); MutationObserver will retry
+    el.dataset.actions = '1';
     scaleSvg(svg);  // apply current font size scale immediately after render
     const wrap = document.createElement('div');
     wrap.className = 'diagram-actions';
     const scaleSelect = document.createElement('select');
     scaleSelect.className = 'png-scale-select';
     scaleSelect.title = 'PNG resolution (×)';
+    const defaultScale = String(window._defaultPngScale || 2);
     for (const [label, val] of [['1×', '1'], ['2×', '2'], ['4×', '4'], ['8×', '8']]) {{
       const opt = document.createElement('option');
       opt.value = val; opt.textContent = label;
-      if (val === '2') opt.selected = true;
+      if (val === defaultScale) opt.selected = true;
       scaleSelect.appendChild(opt);
     }}
     const pngBtn = document.createElement('button');
@@ -318,6 +327,7 @@ def _shell_html(theme: dict, dark: bool) -> str:
     wrap.appendChild(scaleSelect); wrap.appendChild(pngBtn); wrap.appendChild(svgBtn);
     el.appendChild(wrap);
   }}
+
 </script>
 </head>
 <body><div id="content"></div></body>
