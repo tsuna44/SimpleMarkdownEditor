@@ -32,6 +32,37 @@ def _mermaid_script_tag() -> str:
     return '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
 
 
+@lru_cache(maxsize=1)
+def _elk_script_tag() -> str:
+    """Return a <script> tag for elk.bundled.js, or empty string if unavailable.
+    The result is cached so the 1.6 MB file is read only once per process.
+    """
+    path = _vendor_dir() / "elk.bundled.js"
+    if path.exists():
+        js = path.read_text(encoding="utf-8")
+        return f"<script>{js}</script>"
+    return ""
+
+
+# JavaScript function injected into the shell page.
+# Prepends an ELK init directive to complex flowcharts (edge count >= 20)
+# so the ELK layout engine is used automatically — same logic as the standalone HTML.
+_AUTO_ELK_JS = """\
+  function autoInjectElk() {
+    if (typeof ELK === 'undefined') return;
+    document.querySelectorAll('.mermaid').forEach(el => {
+      const code = el.textContent.trim();
+      if (!code.startsWith('%%{init') && /^(flowchart|graph)\\b/im.test(code)) {
+        const n = (code.match(/(-+>|=+>|-.->|--[^-])/g) || []).length;
+        if (n >= 20) {
+          el.textContent = "%%{init: {'flowchart': {'defaultRenderer': 'elk'}} }%%\\n" + code;
+        }
+      }
+    });
+  }
+"""
+
+
 def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
     """Static page loaded once per theme. Content is updated via innerHTML."""
     t = theme
@@ -194,6 +225,7 @@ def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
   }}
 </style>
 {_mermaid_script_tag()}
+{_elk_script_tag()}
 <script>
   const _mermaidTheme = '{"dark" if dark else "default"}';
   const BASE_FONT_SIZE = 14;
@@ -328,6 +360,7 @@ def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
     el.appendChild(wrap);
   }}
 
+{_AUTO_ELK_JS}
 </script>
 </head>
 <body><div id="content"></div></body>

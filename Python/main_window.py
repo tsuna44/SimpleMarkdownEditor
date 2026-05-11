@@ -596,6 +596,7 @@ document.getElementById('content').innerHTML = {js_string};
 document.querySelectorAll('.plantuml').forEach((el, idx) => {{
     addDiagramActions(el, idx);
 }});
+autoInjectElk();
 if (typeof mermaid !== 'undefined') {{
     mermaid.run({{ nodes: document.querySelectorAll('.mermaid') }})
         .then(() => {{
