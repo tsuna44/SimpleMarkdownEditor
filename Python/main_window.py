@@ -308,7 +308,8 @@ class OutlinePanel(QWidget):
 class FileTreePanel(QWidget):
     """File tree panel — shows .md/.markdown/.txt files in a directory."""
 
-    openFile = Signal(str)  # emitted with absolute path when a file is double-clicked
+    openFile = Signal(str)           # emitted with absolute path when a file is clicked
+    requestOpenFolder = Signal()     # emitted when user wants to choose a folder
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -316,10 +317,24 @@ class FileTreePanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        lbl = QLabel("FILES")
-        lbl.setObjectName("pane-label")
-        lbl.setFixedHeight(18)
-        lay.addWidget(lbl)
+        # Header: "FILES" label + folder-open button
+        header = QWidget()
+        header.setObjectName("pane-header")
+        header.setFixedHeight(18)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 1, 4, 1)
+        hl.setSpacing(4)
+        files_lbl = QLabel("FILES")
+        files_lbl.setObjectName("pane-label-files")
+        open_btn = QToolButton()
+        open_btn.setText("📂")
+        open_btn.setObjectName("pane-open-btn")
+        open_btn.setToolTip("フォルダを開く")
+        open_btn.clicked.connect(self.requestOpenFolder)
+        hl.addWidget(files_lbl)
+        hl.addStretch()
+        hl.addWidget(open_btn)
+        lay.addWidget(header)
 
         self._model = QFileSystemModel()
         self._model.setNameFilters(["*.md", "*.markdown", "*.txt"])
@@ -334,7 +349,7 @@ class FileTreePanel(QWidget):
             self._tree.hideColumn(col)
         self._tree.setAnimated(False)
         self._tree.setIndentation(16)
-        self._tree.doubleClicked.connect(self._onDoubleClicked)
+        self._tree.clicked.connect(self._onClicked)
         lay.addWidget(self._tree)
 
         self._root_path = ""
@@ -349,7 +364,7 @@ class FileTreePanel(QWidget):
         self._model.setRootPath(self._root_path)
         self._tree.setRootIndex(self._model.index(self._root_path))
 
-    def _onDoubleClicked(self, index):
+    def _onClicked(self, index):
         path = self._model.filePath(index)
         if Path(path).is_file():
             self.openFile.emit(path)
@@ -882,6 +897,7 @@ class MarkdownEditor(QMainWindow):
         )
 
         self._outline_timer = QTimer(singleShot=True, interval=300)
+        self._folder_manually_set = False
 
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
@@ -943,6 +959,7 @@ class MarkdownEditor(QMainWindow):
         # File tree dock (left side, hidden by default)
         self._file_tree = FileTreePanel()
         self._file_tree.openFile.connect(self._openOrSwitchToFile)
+        self._file_tree.requestOpenFolder.connect(self._openFolder)
         self._file_tree_dock = QDockWidget(self)
         self._file_tree_dock.setObjectName("filetree-dock")
         self._file_tree_dock.setTitleBarWidget(QWidget(self._file_tree_dock))
@@ -995,6 +1012,7 @@ class MarkdownEditor(QMainWindow):
         file_menu = QMenu(self)
         file_menu.addAction("📄  New Tab",   self._newTab).setShortcut(QKeySequence("Ctrl+T"))
         file_menu.addAction("📂  Open",      self._openFile).setShortcut(QKeySequence("Ctrl+O"))
+        file_menu.addAction("📁  フォルダを開く", self._openFolder).setShortcut(QKeySequence("Ctrl+Shift+K"))
         # Recent files submenu — populated dynamically when the menu opens
         self._recent_menu = QMenu("🕐  最近使ったファイル", file_menu)
         file_menu.addMenu(self._recent_menu)
@@ -1499,9 +1517,22 @@ class MarkdownEditor(QMainWindow):
     def _updateFileTreeRoot(self):
         if not self._file_tree_dock.isVisible():
             return
+        if self._folder_manually_set:
+            return
         tab = self._curTab()
         if tab and tab._file:
             self._file_tree.setRootPath(str(Path(tab._file).parent))
+
+    def _openFolder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "フォルダを開く", self._last_dir
+        )
+        if folder:
+            self._folder_manually_set = True
+            self._setLastDir(folder)
+            self._file_tree.setRootPath(folder)
+            if not self._file_tree_dock.isVisible():
+                self._file_tree_dock.show()
 
     # ── Theme / font size
 
@@ -1603,6 +1634,19 @@ class MarkdownEditor(QMainWindow):
             }}
             QSplitter::handle {{ background: {t["border"]}; width: 1px; }}
             QDockWidget#outline-dock, QDockWidget#filetree-dock {{ border: none; }}
+            QWidget#pane-header {{
+                background: {t["surface2"]};
+                border-bottom: 1px solid {t["border"]};
+            }}
+            QLabel#pane-label-files {{
+                font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+                color: {t["text2"]}; background: transparent;
+            }}
+            QToolButton#pane-open-btn {{
+                background: transparent; color: {t["text2"]};
+                border: none; padding: 0 2px; font-size: 11px;
+            }}
+            QToolButton#pane-open-btn:hover {{ color: {t["accent"]}; }}
             QTreeView#file-tree {{
                 background: {t["surface"]}; color: {t["text"]};
                 border: none; outline: none;
