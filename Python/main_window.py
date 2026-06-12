@@ -168,15 +168,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFileDialog, QLabel,
     QMessageBox, QSizePolicy, QToolBar,
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
-    QTreeView, QFileSystemModel, QDialog, QFormLayout, QComboBox,
-    QDialogButtonBox,
+    QTreeView, QDialog, QFormLayout, QComboBox,
+    QDialogButtonBox, QStyledItemDelegate,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
-from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths, QFileSystemWatcher
+from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths, QFileSystemWatcher, QSize
 from PySide6.QtGui import (
     QKeySequence, QTextCursor,
     QAction, QPageLayout, QPageSize,
+    QStandardItemModel, QStandardItem, QPen,
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
@@ -184,6 +185,34 @@ from themes import DARK, LIGHT
 from preview_html import _shell_html
 from editor_widget import CodeEditor
 from search_dialog import SearchDialog
+
+
+# ── Branch arrow SVGs ─────────────────────────────────────────────────────────
+
+_ARROW_DIR: str | None = None
+_ARROW_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _branch_arrow_paths(color: str) -> tuple[str, str]:
+    """Write right/down arrow SVGs to a temp dir and return their paths.
+    Results are cached per color so files are created only once.
+    """
+    global _ARROW_DIR
+    if _ARROW_DIR is None:
+        _ARROW_DIR = tempfile.mkdtemp(prefix="sme_arrows_")
+    if color in _ARROW_CACHE:
+        return _ARROW_CACHE[color]
+    safe = color.lstrip("#")
+    right_path = os.path.join(_ARROW_DIR, f"r_{safe}.svg")
+    down_path  = os.path.join(_ARROW_DIR, f"d_{safe}.svg")
+    with open(right_path, "w", encoding="utf-8") as f:
+        f.write(f"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'>"
+                f"<polygon points='2,1 6,4 2,7' fill='{color}'/></svg>")
+    with open(down_path, "w", encoding="utf-8") as f:
+        f.write(f"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'>"
+                f"<polygon points='1,2 7,2 4,6' fill='{color}'/></svg>")
+    _ARROW_CACHE[color] = (right_path, down_path)
+    return right_path, down_path
 
 
 # ── Preview page (intercepts link navigation) ─────────────────────────────────
@@ -305,11 +334,35 @@ class OutlinePanel(QWidget):
 
 # ── File tree panel ───────────────────────────────────────────────────────────
 
-class FileTreePanel(QWidget):
-    """File tree panel — shows .md/.markdown/.txt files in a directory."""
+_MARKDOWN_EXTS = frozenset({".md", ".markdown", ".txt"})
+_SEP_DATA = "__sep__"
 
-    openFile = Signal(str)           # emitted with absolute path when a file is clicked
-    requestOpenFolder = Signal()     # emitted when user wants to choose a folder
+
+class _SepDelegate(QStyledItemDelegate):
+    """Draws a thin horizontal rule for separator items."""
+
+    def paint(self, painter, option, index):
+        if index.data(Qt.ItemDataRole.UserRole) == _SEP_DATA:
+            painter.save()
+            color = option.palette.mid().color()
+            painter.setPen(QPen(color, 1))
+            y = option.rect.center().y()
+            painter.drawLine(option.rect.left() + 8, y, option.rect.right() - 8, y)
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
+
+    def sizeHint(self, option, index):
+        if index.data(Qt.ItemDataRole.UserRole) == _SEP_DATA:
+            return QSize(0, 9)
+        return super().sizeHint(option, index)
+
+
+class FileTreePanel(QWidget):
+    """File tree panel — shows .md/.markdown/.txt files across multiple root folders."""
+
+    openFile = Signal(str)
+    requestOpenFolder = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -329,45 +382,163 @@ class FileTreePanel(QWidget):
         open_btn = QToolButton()
         open_btn.setText("📂")
         open_btn.setObjectName("pane-open-btn")
-        open_btn.setToolTip("フォルダを開く")
+        open_btn.setToolTip("フォルダを追加")
         open_btn.clicked.connect(self.requestOpenFolder)
         hl.addWidget(files_lbl)
         hl.addStretch()
         hl.addWidget(open_btn)
         lay.addWidget(header)
 
-        self._model = QFileSystemModel()
-        self._model.setNameFilters(["*.md", "*.markdown", "*.txt"])
-        self._model.setNameFilterDisables(False)  # hide non-matching files
-
+        self._model = QStandardItemModel()
         self._tree = QTreeView()
         self._tree.setObjectName("file-tree")
         self._tree.setModel(self._model)
         self._tree.setFrameShape(QTreeView.Shape.NoFrame)
         self._tree.setHeaderHidden(True)
-        for col in range(1, 4):  # hide size / type / date columns
-            self._tree.hideColumn(col)
         self._tree.setAnimated(False)
         self._tree.setIndentation(16)
         self._tree.clicked.connect(self._onClicked)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._onContextMenu)
+        self._tree.setItemDelegate(_SepDelegate(self._tree))
         lay.addWidget(self._tree)
 
-        self._root_path = ""
-        self.setRootPath(str(Path.home()))
+        self._roots: list[str] = []
+        self._path_to_item: dict[str, QStandardItem] = {}
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(self._onDirectoryChanged)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def addRootPath(self, path: str) -> bool:
+        """Add a folder as a new root node. Returns True if added."""
+        p = Path(path).resolve()
+        if not p.is_dir():
+            return False
+        sp = str(p)
+        if sp in self._roots:
+            return False
+        if self._roots:
+            self._model.appendRow(self._makeSeparatorItem())
+        self._roots.append(sp)
+        root_item = self._makeItem(p, is_root=True)
+        self._populateDir(root_item, p)
+        self._model.appendRow(root_item)
+        self._tree.expand(self._model.indexFromItem(root_item))
+        return True
 
     def setRootPath(self, path: str):
-        """Change the root directory shown in the tree."""
-        p = Path(path)
-        if not p.is_dir() or str(p) == self._root_path:
+        """Clear all roots and show a single folder (backward-compat for auto-root)."""
+        self._clearAll()
+        self.addRootPath(path)
+
+    def removeRootPath(self, path: str):
+        """Remove a root folder from the tree."""
+        sp = str(Path(path).resolve())
+        if sp not in self._roots:
             return
-        self._root_path = str(p)
-        self._model.setRootPath(self._root_path)
-        self._tree.setRootIndex(self._model.index(self._root_path))
+
+        root_row = -1
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row)
+            if item and item.data(Qt.ItemDataRole.UserRole) == sp:
+                root_row = row
+                break
+        if root_row >= 0:
+            if root_row > 0 and self._isSepRow(root_row - 1):
+                self._model.removeRow(root_row - 1)
+                root_row -= 1
+            self._model.removeRow(root_row)
+            if self._isSepRow(0):
+                self._model.removeRow(0)
+
+        self._roots.remove(sp)
+        prefix = sp + os.sep
+        stale_keys = [k for k in self._path_to_item if k == sp or k.startswith(prefix)]
+        for k in stale_keys:
+            del self._path_to_item[k]
+        stale_watched = [w for w in (self._watcher.directories() or [])
+                         if w == sp or w.startswith(prefix)]
+        if stale_watched:
+            self._watcher.removePaths(stale_watched)
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _makeSeparatorItem(self) -> QStandardItem:
+        item = QStandardItem()
+        item.setData(_SEP_DATA, Qt.ItemDataRole.UserRole)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        return item
+
+    def _isSepRow(self, row: int) -> bool:
+        if row < 0 or row >= self._model.rowCount():
+            return False
+        item = self._model.item(row)
+        return item is not None and item.data(Qt.ItemDataRole.UserRole) == _SEP_DATA
+
+    def _clearAll(self):
+        self._model.clear()
+        self._roots.clear()
+        self._path_to_item.clear()
+        watched = self._watcher.directories()
+        if watched:
+            self._watcher.removePaths(watched)
+
+    def _makeItem(self, path: Path, is_root: bool = False) -> QStandardItem:
+        item = QStandardItem(path.name)
+        item.setData(str(path), Qt.ItemDataRole.UserRole)
+        item.setEditable(False)
+        if is_root:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+        return item
+
+    def _populateDir(self, item: QStandardItem, path: Path):
+        sp = str(path)
+        self._path_to_item[sp] = item
+        self._watcher.addPath(sp)
+        item.removeRows(0, item.rowCount())
+        try:
+            entries = sorted(path.iterdir(),
+                             key=lambda e: (e.is_file(), e.name.lower()))
+        except PermissionError:
+            return
+        for entry in entries:
+            if entry.name.startswith('.'):
+                continue
+            if entry.is_dir():
+                child = self._makeItem(entry)
+                self._populateDir(child, entry)
+                item.appendRow(child)
+            elif entry.suffix.lower() in _MARKDOWN_EXTS:
+                child = self._makeItem(entry)
+                item.appendRow(child)
+
+    def _onDirectoryChanged(self, path: str):
+        item = self._path_to_item.get(path)
+        if item is None:
+            return
+        self._populateDir(item, Path(path))
+        if path in self._roots:
+            self._tree.expand(self._model.indexFromItem(item))
 
     def _onClicked(self, index):
-        path = self._model.filePath(index)
-        if Path(path).is_file():
+        path = index.data(Qt.ItemDataRole.UserRole)
+        if path and path != _SEP_DATA and Path(path).is_file():
             self.openFile.emit(path)
+
+    def _onContextMenu(self, pos):
+        index = self._tree.indexAt(pos)
+        if not index.isValid():
+            return
+        path = index.data(Qt.ItemDataRole.UserRole)
+        if not path or path not in self._roots:
+            return
+        menu = QMenu(self)
+        remove_act = menu.addAction("フォルダをツリーから削除")
+        if menu.exec(self._tree.viewport().mapToGlobal(pos)) == remove_act:
+            self.removeRootPath(path)
 
 
 _RECENT_MAX = 10
@@ -607,7 +778,9 @@ class EditorTab(QWidget):
         body_html = self._mdToHtml(self.editor.toPlainText(), force_puml=force_puml)
         js_string = json.dumps(body_html)
         self.preview.page().runJavaScript(f"""\
+var _sy = window.scrollY;
 document.getElementById('content').innerHTML = {js_string};
+window.scrollTo(0, _sy);
 document.querySelectorAll('.plantuml').forEach((el, idx) => {{
     addDiagramActions(el, idx);
 }});
@@ -618,11 +791,10 @@ if (typeof mermaid !== 'undefined') {{
             document.querySelectorAll('.mermaid').forEach((el, idx) => {{
                 addDiagramActions(el, idx);
             }});
+            window.scrollTo(0, _sy);
         }});
 }}
 """)
-        # Re-sync scroll after content renders (allow 150 ms for layout)
-        QTimer.singleShot(150, self._syncScroll)
 
     # ── scroll sync
 
@@ -1525,12 +1697,12 @@ class MarkdownEditor(QMainWindow):
 
     def _openFolder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "フォルダを開く", self._last_dir
+            self, "フォルダを追加", self._last_dir
         )
         if folder:
             self._folder_manually_set = True
             self._setLastDir(folder)
-            self._file_tree.setRootPath(folder)
+            self._file_tree.addRootPath(folder)
             if not self._file_tree_dock.isVisible():
                 self._file_tree_dock.show()
 
@@ -1547,6 +1719,10 @@ class MarkdownEditor(QMainWindow):
         # Apply to all tabs
         for i in range(self.tabs.count()):
             self.tabs.widget(i).applyTheme(self._dark)
+
+        r_arrow, d_arrow = _branch_arrow_paths(t["text2"])
+        r_arrow = r_arrow.replace("\\", "/")
+        d_arrow = d_arrow.replace("\\", "/")
 
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background: {t["bg"]}; color: {t["text"]}; }}
@@ -1661,6 +1837,17 @@ class MarkdownEditor(QMainWindow):
             }}
             QTreeView#file-tree::item:hover:!selected {{
                 background: {t["surface2"]}; color: {t["accent"]};
+            }}
+            QTreeView#file-tree::branch {{
+                background: {t["surface"]};
+            }}
+            QTreeView#file-tree::branch:has-children:!has-siblings:closed,
+            QTreeView#file-tree::branch:closed:has-children:has-siblings {{
+                image: url("{r_arrow}");
+            }}
+            QTreeView#file-tree::branch:open:has-children:!has-siblings,
+            QTreeView#file-tree::branch:open:has-children:has-siblings {{
+                image: url("{d_arrow}");
             }}
             QListWidget#outline-list {{
                 background: {t["surface"]}; color: {t["text"]};
