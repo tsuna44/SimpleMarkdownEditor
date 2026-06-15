@@ -336,6 +336,7 @@ class OutlinePanel(QWidget):
 
 _MARKDOWN_EXTS = frozenset({".md", ".markdown", ".txt"})
 _SEP_DATA = "__sep__"
+_PLACEHOLDER_DATA = "__placeholder__"
 
 
 class _SepDelegate(QStyledItemDelegate):
@@ -398,6 +399,7 @@ class FileTreePanel(QWidget):
         self._tree.setAnimated(False)
         self._tree.setIndentation(16)
         self._tree.clicked.connect(self._onClicked)
+        self._tree.expanded.connect(self._onExpanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._onContextMenu)
         self._tree.setItemDelegate(_SepDelegate(self._tree))
@@ -509,11 +511,23 @@ class FileTreePanel(QWidget):
                 continue
             if entry.is_dir():
                 child = self._makeItem(entry)
-                self._populateDir(child, entry)
+                placeholder = QStandardItem()
+                placeholder.setData(_PLACEHOLDER_DATA, Qt.ItemDataRole.UserRole)
+                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+                child.appendRow(placeholder)
                 item.appendRow(child)
             elif entry.suffix.lower() in _MARKDOWN_EXTS:
                 child = self._makeItem(entry)
                 item.appendRow(child)
+
+    def _onExpanded(self, index):
+        item = self._model.itemFromIndex(index)
+        if item is None or item.rowCount() != 1:
+            return
+        first_child = item.child(0)
+        if first_child and first_child.data(Qt.ItemDataRole.UserRole) == _PLACEHOLDER_DATA:
+            path = Path(item.data(Qt.ItemDataRole.UserRole))
+            self._populateDir(item, path)
 
     def _onDirectoryChanged(self, path: str):
         item = self._path_to_item.get(path)
