@@ -547,11 +547,18 @@ class FileTreePanel(QWidget):
         if not index.isValid():
             return
         path = index.data(Qt.ItemDataRole.UserRole)
-        if not path or path not in self._roots:
+        if not path or path in (_SEP_DATA, _PLACEHOLDER_DATA):
             return
         menu = QMenu(self)
-        remove_act = menu.addAction("フォルダをツリーから削除")
-        if menu.exec(self._tree.viewport().mapToGlobal(pos)) == remove_act:
+        copy_act = menu.addAction("📋  パスをコピー")
+        remove_act = None
+        if path in self._roots:
+            menu.addSeparator()
+            remove_act = menu.addAction("フォルダをツリーから削除")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen == copy_act:
+            QApplication.clipboard().setText(path)
+        elif chosen is not None and chosen == remove_act:
             self.removeRootPath(path)
 
 
@@ -1162,6 +1169,7 @@ class MarkdownEditor(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.setObjectName("editor-tabs")
+        self.tabs.tabBar().setExpanding(False)
         self.tabs.tabCloseRequested.connect(self._closeTab)
         self.tabs.currentChanged.connect(self._onTabChanged)
 
@@ -1206,6 +1214,8 @@ class MarkdownEditor(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("💾  Save",      self._saveFile).setShortcut(QKeySequence("Ctrl+S"))
         file_menu.addAction("💾  Save As…",  self._saveFileAs)
+        file_menu.addSeparator()
+        file_menu.addAction("📋  パスをコピー", self._copyFilePath).setShortcut(QKeySequence("Ctrl+Shift+C"))
         file_menu.addSeparator()
         file_menu.addAction("📑  Export PDF…", self._exportPdf).setShortcut(QKeySequence("Ctrl+Shift+E"))
         file_menu.addAction("🖨  Print…",      self._printDoc).setShortcut(QKeySequence("Ctrl+P"))
@@ -1494,6 +1504,14 @@ class MarkdownEditor(QMainWindow):
             tab._file = path
             tab.saveFile()
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
+
+    def _copyFilePath(self):
+        tab = self._curTab()
+        if not tab or not tab._file:
+            self.statusBar().showMessage("ファイルが保存されていません", 3000)
+            return
+        QApplication.clipboard().setText(tab._file)
+        self.statusBar().showMessage(f"パスをコピーしました: {tab._file}", 3000)
 
     def _exportPdf(self):
         tab = self._curTab()

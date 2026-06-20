@@ -75,6 +75,9 @@ from main_window import MarkdownEditor
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Simple Markdown Editor")
+    # The native macOS style centers QTabBar tabs regardless of the app's
+    # stylesheet; Fusion follows the documented left-aligned default instead.
+    app.setStyle("Fusion")
 
     initial = sys.argv[1] if len(sys.argv) > 1 else None
     win = MarkdownEditor(initial)
