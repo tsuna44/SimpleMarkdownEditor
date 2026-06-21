@@ -529,11 +529,46 @@ class FileTreePanel(QWidget):
             path = Path(item.data(Qt.ItemDataRole.UserRole))
             self._populateDir(item, path)
 
+    def _capturedExpandedPaths(self, item: QStandardItem) -> set[str]:
+        """Collect paths of currently expanded descendant folders under item."""
+        expanded: set[str] = set()
+
+        def walk(parent: QStandardItem):
+            for row in range(parent.rowCount()):
+                child = parent.child(row)
+                if child is None:
+                    continue
+                data = child.data(Qt.ItemDataRole.UserRole)
+                if data in (None, _PLACEHOLDER_DATA, _SEP_DATA):
+                    continue
+                if self._tree.isExpanded(self._model.indexFromItem(child)):
+                    expanded.add(data)
+                    walk(child)
+
+        walk(item)
+        return expanded
+
+    def _restoreExpandedPaths(self, item: QStandardItem, expanded: set[str]):
+        """Re-populate and re-expand descendant folders captured by _capturedExpandedPaths."""
+        if not expanded:
+            return
+        for row in range(item.rowCount()):
+            child = item.child(row)
+            if child is None:
+                continue
+            data = child.data(Qt.ItemDataRole.UserRole)
+            if data in expanded:
+                self._populateDir(child, Path(data))
+                self._tree.expand(self._model.indexFromItem(child))
+                self._restoreExpandedPaths(child, expanded)
+
     def _onDirectoryChanged(self, path: str):
         item = self._path_to_item.get(path)
         if item is None:
             return
+        expanded = self._capturedExpandedPaths(item)
         self._populateDir(item, Path(path))
+        self._restoreExpandedPaths(item, expanded)
         if path in self._roots:
             self._tree.expand(self._model.indexFromItem(item))
 
