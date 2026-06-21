@@ -169,7 +169,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QSizePolicy, QToolBar,
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
     QTreeView, QDialog, QFormLayout, QComboBox,
-    QDialogButtonBox, QStyledItemDelegate,
+    QDialogButtonBox, QStyledItemDelegate, QLineEdit,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
@@ -407,10 +407,16 @@ class FileTreePanel(QWidget):
 
         self._roots: list[str] = []
         self._path_to_item: dict[str, QStandardItem] = {}
+        self._visible_dot_entries: set[str] = set()
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._onDirectoryChanged)
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def setVisibleDotEntries(self, names: list[str]):
+        """Set dot-prefixed file/folder names (e.g. '.obsidian') to show despite the leading dot."""
+        self._visible_dot_entries = set(names)
+        self._refreshAll()
 
     def addRootPath(self, path: str) -> bool:
         """Add a folder as a new root node. Returns True if added."""
@@ -507,7 +513,7 @@ class FileTreePanel(QWidget):
         except PermissionError:
             return
         for entry in entries:
-            if entry.name.startswith('.'):
+            if entry.name.startswith('.') and entry.name not in self._visible_dot_entries:
                 continue
             if entry.is_dir():
                 child = self._makeItem(entry)
@@ -561,6 +567,20 @@ class FileTreePanel(QWidget):
                 self._populateDir(child, Path(data))
                 self._tree.expand(self._model.indexFromItem(child))
                 self._restoreExpandedPaths(child, expanded)
+
+    def _refreshAll(self):
+        """Re-populate every root tree (e.g. after the dot-entry visibility setting changes)."""
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row)
+            if item is None or item.data(Qt.ItemDataRole.UserRole) == _SEP_DATA:
+                continue
+            path = item.data(Qt.ItemDataRole.UserRole)
+            was_expanded = self._tree.isExpanded(self._model.indexFromItem(item))
+            expanded = self._capturedExpandedPaths(item)
+            self._populateDir(item, Path(path))
+            self._restoreExpandedPaths(item, expanded)
+            if was_expanded:
+                self._tree.expand(self._model.indexFromItem(item))
 
     def _onDirectoryChanged(self, path: str):
         item = self._path_to_item.get(path)
@@ -1117,6 +1137,9 @@ class MarkdownEditor(QMainWindow):
         self._recent_files: list[str] = json.loads(
             self._settings.value("recent_files", "[]")
         )
+        self._visible_dot_entries: list[str] = json.loads(
+            self._settings.value("visible_dot_entries", "[]")
+        )
         _apply_puml_settings(
             self._settings.value("puml_jvm_mem",      "1g"),
             int(self._settings.value("puml_limit_size", 32768)),
@@ -1186,6 +1209,7 @@ class MarkdownEditor(QMainWindow):
 
         # File tree dock (left side, hidden by default)
         self._file_tree = FileTreePanel()
+        self._file_tree.setVisibleDotEntries(self._visible_dot_entries)
         self._file_tree.openFile.connect(self._openOrSwitchToFile)
         self._file_tree.requestOpenFolder.connect(self._openFolder)
         self._file_tree_dock = QDockWidget(self)
@@ -1389,6 +1413,11 @@ class MarkdownEditor(QMainWindow):
             png_box.setCurrentIndex(cur_png_idx)
         form.addRow("PNG デフォルト解像度:", png_box)
 
+        dot_edit = QLineEdit(", ".join(self._visible_dot_entries))
+        dot_edit.setPlaceholderText(".obsidian, .templates")
+        dot_edit.setToolTip("ファイルツリーに表示する「.」始まりのフォルダ／ファイル名（カンマ区切り）")
+        form.addRow("表示するドット項目:", dot_edit)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(dlg.accept)
@@ -1407,6 +1436,13 @@ class MarkdownEditor(QMainWindow):
         self._settings.setValue("puml_limit_size",   size)
         self._settings.setValue("puml_render_mode",  mode)
         self._settings.setValue("png_default_scale", png_scale)
+        self._visible_dot_entries = [
+            n if n.startswith('.') else f".{n}"
+            for n in (s.strip() for s in dot_edit.text().split(","))
+            if n.strip()
+        ]
+        self._settings.setValue("visible_dot_entries", json.dumps(self._visible_dot_entries))
+        self._file_tree.setVisibleDotEntries(self._visible_dot_entries)
         self._puml_render_btn.setVisible(mode == "manual")
         # Update the JS global in all open tabs without reloading the page
         for i in range(self.tabs.count()):
