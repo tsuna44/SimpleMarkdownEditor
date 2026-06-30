@@ -599,22 +599,30 @@ class FileTreePanel(QWidget):
 
     def _onContextMenu(self, pos):
         index = self._tree.indexAt(pos)
+        menu = QMenu(self)
         if not index.isValid():
+            open_act = menu.addAction("📂  フォルダを開く...")
+            chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+            if chosen == open_act:
+                self.requestOpenFolder.emit()
             return
         path = index.data(Qt.ItemDataRole.UserRole)
         if not path or path in (_SEP_DATA, _PLACEHOLDER_DATA):
             return
-        menu = QMenu(self)
         copy_act = menu.addAction("📋  パスをコピー")
         remove_act = None
         if path in self._roots:
             menu.addSeparator()
             remove_act = menu.addAction("フォルダをツリーから削除")
+        menu.addSeparator()
+        open_act = menu.addAction("📂  フォルダを開く...")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen == copy_act:
             QApplication.clipboard().setText(path)
         elif chosen is not None and chosen == remove_act:
             self.removeRootPath(path)
+        elif chosen is not None and chosen == open_act:
+            self.requestOpenFolder.emit()
 
 
 _RECENT_MAX = 10
@@ -1092,7 +1100,7 @@ if (typeof mermaid !== 'undefined') {{
 
     def showSearch(self):
         if self._search_dlg is None:
-            self._search_dlg = SearchDialog(self.editor, self)
+            self._search_dlg = SearchDialog(self.editor, self.preview, self)
         self._search_dlg.popup()
 
     # ── permissions / downloads
