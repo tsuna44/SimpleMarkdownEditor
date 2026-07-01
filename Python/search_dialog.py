@@ -29,7 +29,7 @@ class SearchDialog(QDialog):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("検索...")
         self.target_btn = QPushButton("Md")
-        self.target_btn.setFixedWidth(30)
+        self.target_btn.setFixedWidth(40)
         self.target_btn.setCheckable(True)
         self.target_btn.setEnabled(self.preview is not None)
         self.target_btn.setToolTip("検索対象: Markdown（クリックでプレビューに切替）")
