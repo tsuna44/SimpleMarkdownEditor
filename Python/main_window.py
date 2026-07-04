@@ -2,6 +2,7 @@
 Main window (MarkdownEditor) for Simple Markdown Editor.
 """
 
+import codecs
 import os
 import re
 import sys
@@ -39,6 +40,50 @@ def _load_versions() -> dict:
             return _json.load(f)
     except Exception:
         return {}
+
+
+# ── Encoding / newline handling ──────────────────────────────────────────────
+
+ENCODINGS = [
+    ("utf-8",     "UTF-8"),
+    ("utf-8-sig", "UTF-8 (BOM付き)"),
+    ("shift_jis", "Shift_JIS"),
+    ("euc_jp",    "EUC-JP"),
+]
+_ENCODING_LABELS = dict(ENCODINGS)
+
+
+def _detect_encoding(raw: bytes, last_used: str = "utf-8"):
+    """Guess the encoding of *raw* bytes: BOM → UTF-8 → last-used encoding.
+
+    Returns the encoding name, or None if none of those decode cleanly
+    (caller should then ask the user to pick one explicitly).
+    """
+    if raw.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    for enc in dict.fromkeys(["utf-8", last_used]):
+        try:
+            raw.decode(enc)
+            return enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return None
+
+
+def _detect_newline(text: str) -> str:
+    return "CRLF" if "\r\n" in text else "LF"
+
+
+def _read_text_file(path: str, encoding: str):
+    """Read *path* with *encoding*, normalizing line endings to '\\n'.
+
+    Returns (text, newline) where newline is 'LF' or 'CRLF'.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    text = raw.decode(encoding, errors="replace")
+    newline = _detect_newline(text)
+    return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
 _JVM_MEM          = "1g"
@@ -169,7 +214,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QSizePolicy, QToolBar,
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
     QTreeView, QDialog, QFormLayout, QComboBox,
-    QDialogButtonBox, QStyledItemDelegate, QLineEdit,
+    QDialogButtonBox, QStyledItemDelegate, QLineEdit, QInputDialog,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
@@ -684,6 +729,17 @@ Preview --> User : Show result
 
 # ── EditorTab ─────────────────────────────────────────────────────────────────
 
+class ClickableLabel(QLabel):
+    """A QLabel that emits ``clicked`` on left click (used for status-bar menus)."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class EditorTab(QWidget):
     """A single editor + preview pane that lives inside a QTabWidget tab."""
 
@@ -694,6 +750,8 @@ class EditorTab(QWidget):
         self._dark = dark
         self._file = None         # str | None
         self._modified = False
+        self._encoding = "utf-8"  # one of ENCODINGS keys
+        self._newline = "LF"      # "LF" | "CRLF"
         self._font_size = font_size
         self._tmp_html = None     # str | None  (temp file for preview)
         self._search_dlg = None   # SearchDialog | None
@@ -911,9 +969,16 @@ if (typeof mermaid !== 'undefined') {{
 
     # ── file operations
 
-    def loadFile(self, path: str):
-        with open(path, encoding='utf-8') as f:
-            content = f.read()
+    def loadFile(self, path: str, encoding: str = None):
+        if encoding is None:
+            with open(path, 'rb') as f:
+                raw = f.read()
+            encoding = _detect_encoding(raw, last_used=self._encoding)
+            if encoding is None:
+                encoding = self._promptEncodingChoice(path)
+        content, newline = _read_text_file(path, encoding)
+        self._encoding = encoding
+        self._newline = newline
         if self._file and self._file in self._watcher.files():
             self._watcher.removePath(self._file)
         self._file = path
@@ -923,13 +988,39 @@ if (typeof mermaid !== 'undefined') {{
         self._watcher.addPath(path)
         self._refreshTitle()
 
+    def _promptEncodingChoice(self, path: str) -> str:
+        """Ask the user for the file's encoding when auto-detection fails."""
+        labels = [label for _, label in ENCODINGS]
+        keys = [key for key, _ in ENCODINGS]
+        item, ok = QInputDialog.getItem(
+            self, "文字コードを選択",
+            f"「{Path(path).name}」の文字コードを自動判定できませんでした。\n"
+            f"文字コードを選択してください。",
+            labels, 0, False,
+        )
+        return keys[labels.index(item)] if ok else "utf-8"
+
     def saveFile(self) -> bool:
-        """Save to current path. Returns False if no path is set."""
+        """Save to current path. Returns False if no path is set or saving failed."""
         if not self._file:
             return False
+        text = self.editor.toPlainText()
+        if self._newline == "CRLF":
+            text = text.replace("\n", "\r\n")
+        try:
+            data = text.encode(self._encoding)
+        except UnicodeEncodeError as e:
+            QMessageBox.warning(
+                self, "保存エラー",
+                f"現在の文字コード（{_ENCODING_LABELS.get(self._encoding, self._encoding)}）"
+                f"では保存できない文字が含まれています。\n"
+                f"文字コードを UTF-8 に変更するか、該当の文字を編集してください。\n\n"
+                f"詳細: {e}",
+            )
+            return False
         self._saving = True
-        with open(self._file, 'w', encoding='utf-8') as f:
-            f.write(self.editor.toPlainText())
+        with open(self._file, 'wb') as f:
+            f.write(data)
         self._saving = False
         # Some editors replace the file (unlink + create), re-add after save
         if self._file not in self._watcher.files():
@@ -946,8 +1037,8 @@ if (typeof mermaid !== 'undefined') {{
         # Re-add path in case the editor replaced the file inode
         if path not in self._watcher.files():
             self._watcher.addPath(path)
-        with open(path, encoding='utf-8') as f:
-            content = f.read()
+        content, newline = _read_text_file(path, self._encoding)
+        self._newline = newline
         cursor_pos = self.editor.textCursor().position()
         self._modified = False
         self.editor.setPlainText(content)
@@ -1163,7 +1254,7 @@ class MarkdownEditor(QMainWindow):
         self.setAcceptDrops(True)
 
         if initial_file and Path(initial_file).exists():
-            self._curTab().loadFile(initial_file)
+            self._loadFileIntoTab(self._curTab(), initial_file)
         # else the first tab already has _DEFAULT_MD
 
     # ── Drag & Drop
@@ -1350,6 +1441,14 @@ class MarkdownEditor(QMainWindow):
         self._lnColLbl = QLabel("Ln 1, Col 1")
         self._wordsLbl = QLabel("0 words")
         self._charsLbl = QLabel("0 chars")
+        self._encodingLbl = ClickableLabel(_ENCODING_LABELS["utf-8"])
+        self._encodingLbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._encodingLbl.setToolTip("クリックして文字コードを変更")
+        self._encodingLbl.clicked.connect(self._showEncodingMenu)
+        self._newlineLbl = ClickableLabel("LF")
+        self._newlineLbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._newlineLbl.setToolTip("クリックして改行コードを変更")
+        self._newlineLbl.clicked.connect(self._showNewlineMenu)
         versions = _load_versions()
         mermaid_ver = versions.get("mermaid", "?")
         plantuml_ver = versions.get("plantuml", "?")
@@ -1370,6 +1469,10 @@ class MarkdownEditor(QMainWindow):
         sb.addWidget(self._wordsLbl)
         sb.addWidget(QLabel("|"))
         sb.addWidget(self._charsLbl)
+        sb.addWidget(QLabel("|"))
+        sb.addWidget(self._encodingLbl)
+        sb.addWidget(QLabel("|"))
+        sb.addWidget(self._newlineLbl)
         sb.addPermanentWidget(ver_badge)
         sb.addPermanentWidget(app_badge)
 
@@ -1474,7 +1577,7 @@ class MarkdownEditor(QMainWindow):
             idx = self.tabs.addTab(tab, Path(file_path).name)
             self.tabs.setCurrentIndex(idx)
             tab.applyTheme(self._dark)
-            tab.loadFile(file_path)
+            self._loadFileIntoTab(tab, file_path)
         else:
             idx = self.tabs.addTab(tab, "untitled.md")
             self.tabs.setCurrentIndex(idx)
@@ -1517,6 +1620,12 @@ class MarkdownEditor(QMainWindow):
 
     # ── File operations
 
+    def _loadFileIntoTab(self, tab, path: str):
+        """Load *path* into *tab*, seeding auto-detection with the last-used encoding."""
+        tab._encoding = self._settings.value("last_encoding", "utf-8")
+        tab.loadFile(path)
+        self._settings.setValue("last_encoding", tab._encoding)
+
     def _openOrSwitchToFile(self, path: str):
         """Open *path* in the editor, reusing an existing tab if already open."""
         abs_path = str(Path(path).resolve())
@@ -1531,7 +1640,7 @@ class MarkdownEditor(QMainWindow):
         cur = self._curTab()
         if cur and cur._file is None and not cur._modified \
                 and not cur.editor.toPlainText().strip():
-            cur.loadFile(abs_path)
+            self._loadFileIntoTab(cur, abs_path)
             cur.applyTheme(self._dark)
         else:
             self._addTab(file_path=abs_path)
@@ -1553,7 +1662,7 @@ class MarkdownEditor(QMainWindow):
             tab = self._curTab()
             if tab and tab._file is None and not tab._modified \
                     and not tab.editor.toPlainText().strip():
-                tab.loadFile(path)
+                self._loadFileIntoTab(tab, path)
                 tab.applyTheme(self._dark)
             else:
                 self._addTab(file_path=path)
@@ -1711,6 +1820,74 @@ class MarkdownEditor(QMainWindow):
         self._lnColLbl.setText(f"Ln {ln}, Col {col}")
         self._wordsLbl.setText(f"{words} words")
         self._charsLbl.setText(f"{len(text)} chars")
+        self._encodingLbl.setText(_ENCODING_LABELS.get(tab._encoding, tab._encoding))
+        self._newlineLbl.setText(tab._newline)
+
+    # ── Encoding / newline
+
+    def _showEncodingMenu(self):
+        tab = self._curTab()
+        if not tab:
+            return
+        menu = QMenu(self)
+        for key, label in ENCODINGS:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(tab._encoding == key)
+            a.triggered.connect(lambda checked, k=key: self._setEncoding(k))
+        if tab._file:
+            menu.addSeparator()
+            reload_menu = menu.addMenu("このエンコードで再読み込み")
+            for key, label in ENCODINGS:
+                reload_menu.addAction(label, lambda k=key: self._reloadWithEncoding(k))
+        menu.exec(self._encodingLbl.mapToGlobal(self._encodingLbl.rect().bottomLeft()))
+
+    def _setEncoding(self, encoding: str):
+        tab = self._curTab()
+        if not tab:
+            return
+        tab._encoding = encoding
+        tab._modified = True
+        self._settings.setValue("last_encoding", encoding)
+        tab._refreshTitle()
+        self._updateStatus()
+
+    def _reloadWithEncoding(self, encoding: str):
+        tab = self._curTab()
+        if not tab or not tab._file:
+            return
+        if tab._modified:
+            r = QMessageBox.question(
+                self, "確認",
+                "保存されていない変更は破棄されますが、指定した文字コードで再読み込みしますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        tab.loadFile(tab._file, encoding=encoding)
+        self._settings.setValue("last_encoding", encoding)
+        self._updateStatus()
+
+    def _showNewlineMenu(self):
+        tab = self._curTab()
+        if not tab:
+            return
+        menu = QMenu(self)
+        for key, label in (("LF", "LF (Unix)"), ("CRLF", "CRLF (Windows)")):
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(tab._newline == key)
+            a.triggered.connect(lambda checked, k=key: self._setNewline(k))
+        menu.exec(self._newlineLbl.mapToGlobal(self._newlineLbl.rect().bottomLeft()))
+
+    def _setNewline(self, newline: str):
+        tab = self._curTab()
+        if not tab:
+            return
+        tab._newline = newline
+        tab._modified = True
+        tab._refreshTitle()
+        self._updateStatus()
 
     # ── Outline
 
