@@ -187,6 +187,9 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
   .sp-count.sp-no-match { color: #c0392b; }
   .sp-close { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: none; border-radius: 4px; background: transparent; color: var(--text2); cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; transition: background .15s, color .15s; }
   .sp-close:hover { background: var(--toolbar-btn-active-bg); color: var(--text); }
+  .sp-row.sp-disabled { opacity: .4; pointer-events: none; }
+  mark.sp-pv-mark { background: rgba(192,96,58,0.3); color: inherit; border-radius: 2px; }
+  mark.sp-pv-mark.sp-pv-mark-current { background: rgba(192,96,58,0.65); }
 
   /* ── Resizer ── */
   #resizer { width: 4px; cursor: col-resize; background: var(--divider); flex-shrink: 0; transition: background .1s; z-index: 10; }
@@ -274,6 +277,7 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
   <div id="search-panel">
     <div class="sp-row">
       <input id="sp-search" class="sp-input" type="text" placeholder="検索..." autocomplete="off" spellcheck="false">
+      <button class="sp-toggle" id="sp-btn-target" onclick="spToggleTarget()" title="検索対象: Markdown（クリックでプレビューに切替）">Md</button>
       <button class="sp-toggle" id="sp-btn-case" onclick="spToggle('case')" title="大文字小文字を区別 (Alt+C)">Aa</button>
       <button class="sp-toggle" id="sp-btn-regex" onclick="spToggle('regex')" title="正規表現 (Alt+R)">.*</button>
       <button class="sp-btn" id="sp-prev" onclick="spMove(-1)" title="前へ (Shift+Enter)"><svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg></button>
@@ -281,7 +285,7 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
       <span class="sp-count" id="sp-count"></span>
       <button class="sp-close" onclick="closeSearchPanel()" title="閉じる (Esc)">×</button>
     </div>
-    <div class="sp-row">
+    <div class="sp-row" id="sp-replace-row">
       <input id="sp-replace" class="sp-input" type="text" placeholder="置換..." autocomplete="off" spellcheck="false">
       <button class="sp-btn sp-replace-one" onclick="spReplaceOne()" title="置換">置換</button>
       <button class="sp-btn sp-replace-all" onclick="spReplaceAll()" title="すべて置換">すべて置換</button>
@@ -11847,20 +11851,22 @@ if (!Array.prototype.findLastIndex) {
     mermaidCounter = 0;
     preview.innerHTML = marked.parse(preprocessDetailsBlocks(editor.value));
     const wraps = preview.querySelectorAll('[data-mermaid-id]');
-    if (!wraps.length) return;
-    initMermaid();
-    for (const wrap of wraps) {
-      let code = decodeURIComponent(wrap.dataset.mermaidCode);
-      const id = wrap.dataset.mermaidId;
-      if (typeof ELK !== 'undefined' && !code.startsWith('%%{init') && /^(flowchart|graph)\b/im.test(code)) {
-        const edgeCount = (code.match(/(-+>|=+>|-.->|--[^-])/g) || []).length;
-        if (edgeCount >= 20) {
-          code = `%%{init: {'flowchart': {'defaultRenderer': 'elk'}} }%%\n` + code;
+    if (wraps.length) {
+      initMermaid();
+      for (const wrap of wraps) {
+        let code = decodeURIComponent(wrap.dataset.mermaidCode);
+        const id = wrap.dataset.mermaidId;
+        if (typeof ELK !== 'undefined' && !code.startsWith('%%{init') && /^(flowchart|graph)\b/im.test(code)) {
+          const edgeCount = (code.match(/(-+>|=+>|-.->|--[^-])/g) || []).length;
+          if (edgeCount >= 20) {
+            code = `%%{init: {'flowchart': {'defaultRenderer': 'elk'}} }%%\n` + code;
+          }
         }
+        try { const {svg} = await mermaid.render('m'+id, code); wrap.innerHTML=svg; addCopyButtons(wrap); }
+        catch(e) { wrap.innerHTML=`<div class="mermaid-error">⚠ Mermaid エラー: ${e.message||e}</div>`; }
       }
-      try { const {svg} = await mermaid.render('m'+id, code); wrap.innerHTML=svg; addCopyButtons(wrap); }
-      catch(e) { wrap.innerHTML=`<div class="mermaid-error">⚠ Mermaid エラー: ${e.message||e}</div>`; }
     }
+    if (spPanel.classList.contains('open') && spOpts.target === 'preview') spRunSearch();
   }
   function scheduleRender() { clearTimeout(renderTimer); renderTimer=setTimeout(renderPreview,200); }
 
@@ -12108,18 +12114,45 @@ if (!Array.prototype.findLastIndex) {
   document.addEventListener('mouseup',()=>{if(!dragging)return;dragging=false;resizer.classList.remove('dragging');document.body.style.userSelect='';document.body.style.cursor='';});
 
   // ── Search & Replace ─────────────────────────────────────────────
-  const spPanel=document.getElementById('search-panel'),spSearch=document.getElementById('sp-search'),spReplace=document.getElementById('sp-replace'),spCount=document.getElementById('sp-count');
-  let spMatches=[],spCurrent=-1,spOpts={case:false,regex:false};
+  const spPanel=document.getElementById('search-panel'),spSearch=document.getElementById('sp-search'),spReplace=document.getElementById('sp-replace'),spCount=document.getElementById('sp-count'),spReplaceRow=document.getElementById('sp-replace-row');
+  let spMatches=[],spCurrent=-1,spOpts={case:false,regex:false,target:'source'};
   function spBuildRegex(q){if(!q)return null;try{return new RegExp(spOpts.regex?q:q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),spOpts.case?'g':'gi');}catch(e){return null;}}
+  function spClearPreviewMarks(){
+    const marks=preview.querySelectorAll('mark.sp-pv-mark');
+    if(!marks.length)return;
+    marks.forEach(m=>m.replaceWith(document.createTextNode(m.textContent)));
+    preview.normalize();
+  }
   function spRunSearch(){
     const q=spSearch.value; spSearch.classList.remove('sp-error'); spMatches=[]; spCurrent=-1;
+    spClearPreviewMarks();
     if(!q){spCount.textContent='';spCount.classList.remove('sp-no-match');spHighlight(-1);return;}
     if(spOpts.regex){try{new RegExp(q);}catch(e){spSearch.classList.add('sp-error');spCount.textContent='無効な正規表現';return;}}
     const rx=spBuildRegex(q); if(!rx)return;
+    if(spOpts.target==='preview'){spRunSearchPreview(rx);return;}
     const text=editor.value; let m;
     while((m=rx.exec(text))!==null){spMatches.push({start:m.index,end:m.index+m[0].length});if(m[0].length===0)rx.lastIndex++;}
     if(spMatches.length===0){spCount.textContent='見つかりません';spCount.classList.add('sp-no-match');spHighlight(-1);}
     else{spCurrent=0;spCount.classList.remove('sp-no-match');spJumpTo(0);}
+  }
+  function spRunSearchPreview(rx){
+    const walker=document.createTreeWalker(preview,NodeFilter.SHOW_TEXT,{acceptNode(node){return node.nodeValue.trim()?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_SKIP;}});
+    const textNodes=[]; let n; while((n=walker.nextNode()))textNodes.push(n);
+    for(const node of textNodes){
+      const text=node.nodeValue; rx.lastIndex=0; let m; const ranges=[];
+      while((m=rx.exec(text))!==null){ranges.push([m.index,m.index+m[0].length]);if(m[0].length===0)rx.lastIndex++;}
+      if(!ranges.length)continue;
+      const frag=document.createDocumentFragment(); let last=0;
+      for(const [s,e] of ranges){
+        if(s>last)frag.appendChild(document.createTextNode(text.slice(last,s)));
+        const mark=document.createElement('mark'); mark.className='sp-pv-mark'; mark.textContent=text.slice(s,e);
+        frag.appendChild(mark); spMatches.push(mark); last=e;
+      }
+      if(last<text.length)frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag,node);
+    }
+    if(!spMatches.length){spCount.textContent='見つかりません';spCount.classList.add('sp-no-match');}
+    else{spCurrent=0;spCount.classList.remove('sp-no-match');spJumpToPreview(0);}
   }
   function spJumpTo(idx){
     if(!spMatches.length)return; spCurrent=(idx+spMatches.length)%spMatches.length;
@@ -12128,9 +12161,15 @@ if (!Array.prototype.findLastIndex) {
     wrap.scrollTop=Math.max(0,linesB*lineH-wrap.clientHeight/2);
     spCount.textContent=`${spCurrent+1} / ${spMatches.length}`; spHighlight(spCurrent);
   }
+  function spJumpToPreview(idx){
+    if(!spMatches.length)return; spCurrent=(idx+spMatches.length)%spMatches.length;
+    spMatches.forEach((el,i)=>el.classList.toggle('sp-pv-mark-current',i===spCurrent));
+    spMatches[spCurrent].scrollIntoView({block:'center',behavior:'smooth'});
+    spCount.textContent=`${spCurrent+1} / ${spMatches.length}`;
+  }
   function spHighlight(activeIdx){
     let canvas=document.getElementById('search-highlight-canvas'),wrap=document.getElementById('editor-wrap');
-    if(activeIdx<0||!spMatches.length){if(canvas)canvas.remove();return;}
+    if(activeIdx<0||!spMatches.length||spOpts.target!=='source'){if(canvas)canvas.remove();return;}
     if(!canvas){canvas=document.createElement('canvas');canvas.id='search-highlight-canvas';canvas.style.cssText='position:absolute;top:0;left:0;pointer-events:none;z-index:1;';wrap.appendChild(canvas);}
     canvas.width=wrap.scrollWidth;canvas.height=wrap.scrollHeight;canvas.style.width=canvas.width+'px';canvas.style.height=canvas.height+'px';
     const ctx=canvas.getContext('2d'),style=getComputedStyle(editor),lineH=parseFloat(style.lineHeight)||22,fontSize=parseFloat(style.fontSize)||13.5,pt=parseFloat(style.paddingTop)||14,pl=parseFloat(style.paddingLeft)||16+44;
@@ -12143,15 +12182,24 @@ if (!Array.prototype.findLastIndex) {
     }
   }
   window.spToggle=function(key){spOpts[key]=!spOpts[key];document.getElementById('sp-btn-'+key).classList.toggle('active',spOpts[key]);spRunSearch();};
-  window.spMove=function(dir){if(spMatches.length)spJumpTo(spCurrent+dir);};
+  window.spToggleTarget=function(){
+    spOpts.target=spOpts.target==='source'?'preview':'source';
+    const btn=document.getElementById('sp-btn-target'),isPreview=spOpts.target==='preview';
+    btn.textContent=isPreview?'Pv':'Md';
+    btn.classList.toggle('active',isPreview);
+    btn.title=isPreview?'検索対象: プレビュー（クリックでMarkdownに切替）':'検索対象: Markdown（クリックでプレビューに切替）';
+    spReplaceRow.classList.toggle('sp-disabled',isPreview);
+    spRunSearch();
+  };
+  window.spMove=function(dir){if(!spMatches.length)return;spOpts.target==='preview'?spJumpToPreview(spCurrent+dir):spJumpTo(spCurrent+dir);};
   window.spReplaceOne=function(){
-    if(!spMatches.length||spCurrent<0)return;const m=spMatches[spCurrent];let rep=spReplace.value;
+    if(spOpts.target==='preview'||!spMatches.length||spCurrent<0)return;const m=spMatches[spCurrent];let rep=spReplace.value;
     if(spOpts.regex){const rx=spBuildRegex(spSearch.value);if(rx){const src=editor.value.substring(m.start,m.end);rep=src.replace(new RegExp(rx.source,rx.flags.replace('g','')),rep);}}
     editor.value=editor.value.substring(0,m.start)+rep+editor.value.substring(m.end);refresh();spRunSearch();showToast('1件置換しました');
   };
-  window.spReplaceAll=function(){if(!spMatches.length)return;const rx=spBuildRegex(spSearch.value);if(!rx)return;const count=spMatches.length;editor.value=editor.value.replace(rx,spReplace.value);refresh();spRunSearch();showToast(`${count}件をすべて置換しました`);};
+  window.spReplaceAll=function(){if(spOpts.target==='preview'||!spMatches.length)return;const rx=spBuildRegex(spSearch.value);if(!rx)return;const count=spMatches.length;editor.value=editor.value.replace(rx,spReplace.value);refresh();spRunSearch();showToast(`${count}件をすべて置換しました`);};
   function openSearchPanel(){spPanel.classList.add('open');document.getElementById('search-tb-btn').classList.add('active');spSearch.focus();spSearch.select();if(spSearch.value)spRunSearch();}
-  function closeSearchPanel(){spPanel.classList.remove('open');document.getElementById('search-tb-btn').classList.remove('active');spMatches=[];spCurrent=-1;spHighlight(-1);spCount.textContent='';editor.focus();}
+  function closeSearchPanel(){spPanel.classList.remove('open');document.getElementById('search-tb-btn').classList.remove('active');spMatches=[];spCurrent=-1;spHighlight(-1);spClearPreviewMarks();spCount.textContent='';editor.focus();}
   window.toggleSearchPanel=function(){spPanel.classList.contains('open')?closeSearchPanel():openSearchPanel();};
   window.openSearchPanel=openSearchPanel;window.closeSearchPanel=closeSearchPanel;
   spSearch.addEventListener('input',spRunSearch);
