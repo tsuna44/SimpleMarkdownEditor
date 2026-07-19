@@ -377,11 +377,91 @@ class OutlinePanel(QWidget):
         self.jumpTo.emit(item.data(Qt.ItemDataRole.UserRole))
 
 
+class _EditorRowWidget(QWidget):
+    """One row in the OPEN EDITORS list: a label plus a close (✕) button."""
+
+    activateRequested = Signal()
+    closeRequested = Signal()
+
+    def __init__(self, title: str, tooltip: str, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 2, 0)
+        lay.setSpacing(2)
+
+        self._label = QLabel(title)
+        self._label.setObjectName("open-editor-label")
+        self._label.setToolTip(tooltip)
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        lay.addWidget(self._label, 1)
+
+        close_btn = QToolButton()
+        close_btn.setText("✕")
+        close_btn.setObjectName("open-editor-close-btn")
+        close_btn.setToolTip("閉じる")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.closeRequested)
+        lay.addWidget(close_btn)
+
+    def setCurrent(self, is_current: bool):
+        f = self._label.font()
+        f.setBold(is_current)
+        self._label.setFont(f)
+        self._label.setStyleSheet("color: #fff;" if is_current else "")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activateRequested.emit()
+        super().mousePressEvent(event)
+
+
+class OpenEditorsPanel(QWidget):
+    """VSCode-style list of every open tab, so a file stays identifiable
+    (full path on hover, disambiguated by parent folder) even when many
+    tabs are open and the tab bar itself has no room to show that. Each
+    row also has a close button so a file can be closed directly from here."""
+
+    activateTab = Signal(int)  # tab index
+    closeTab = Signal(int)     # tab index
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        lbl = QLabel("OPEN EDITORS")
+        lbl.setObjectName("pane-label")
+        lbl.setFixedHeight(18)
+        lay.addWidget(lbl)
+
+        self._list = QListWidget()
+        self._list.setObjectName("open-editors-list")
+        self._list.setFrameShape(QListWidget.Shape.NoFrame)
+        lay.addWidget(self._list)
+
+    def refresh(self, entries: list[tuple[str, str]], current_index: int):
+        """entries: (display_title, tooltip_text) per tab, in tab order."""
+        self._list.clear()
+        for i, (title, tooltip) in enumerate(entries):
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 22))
+            self._list.addItem(item)
+            row = _EditorRowWidget(title, tooltip)
+            row.setCurrent(i == current_index)
+            row.activateRequested.connect(lambda i=i: self.activateTab.emit(i))
+            row.closeRequested.connect(lambda i=i: self.closeTab.emit(i))
+            self._list.setItemWidget(item, row)
+        if 0 <= current_index < self._list.count():
+            self._list.setCurrentRow(current_index)
+
+
 # ── File tree panel ───────────────────────────────────────────────────────────
 
 _MARKDOWN_EXTS = frozenset({".md", ".markdown", ".txt"})
 _SEP_DATA = "__sep__"
 _PLACEHOLDER_DATA = "__placeholder__"
+_IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class _SepDelegate(QStyledItemDelegate):
@@ -445,6 +525,7 @@ class FileTreePanel(QWidget):
         self._tree.setIndentation(16)
         self._tree.clicked.connect(self._onClicked)
         self._tree.expanded.connect(self._onExpanded)
+        self._tree.collapsed.connect(self._onCollapsed)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._onContextMenu)
         self._tree.setItemDelegate(_SepDelegate(self._tree))
@@ -474,7 +555,7 @@ class FileTreePanel(QWidget):
         if self._roots:
             self._model.appendRow(self._makeSeparatorItem())
         self._roots.append(sp)
-        root_item = self._makeItem(p, is_root=True)
+        root_item = self._makeItem(p)
         self._populateDir(root_item, p)
         self._model.appendRow(root_item)
         self._tree.expand(self._model.indexFromItem(root_item))
@@ -537,15 +618,26 @@ class FileTreePanel(QWidget):
         if watched:
             self._watcher.removePaths(watched)
 
-    def _makeItem(self, path: Path, is_root: bool = False) -> QStandardItem:
-        item = QStandardItem(path.name)
+    def _makeItem(self, path: Path) -> QStandardItem:
+        is_dir = path.is_dir()
+        item = QStandardItem(self._folderLabel(path.name, is_dir, expanded=False))
         item.setData(str(path), Qt.ItemDataRole.UserRole)
+        item.setData(is_dir, _IS_DIR_ROLE)
         item.setEditable(False)
-        if is_root:
+        if is_dir:
+            # Bold weight + a folder icon (📁/📂 depending on expanded state) make
+            # folders read clearly apart from files, which low text-color contrast
+            # alone did not achieve.
             font = item.font()
             font.setBold(True)
             item.setFont(font)
         return item
+
+    @staticmethod
+    def _folderLabel(name: str, is_dir: bool, expanded: bool) -> str:
+        if not is_dir:
+            return name
+        return f"{'📂' if expanded else '📁'}  {name}"
 
     def _populateDir(self, item: QStandardItem, path: Path):
         sp = str(path)
@@ -573,12 +665,26 @@ class FileTreePanel(QWidget):
 
     def _onExpanded(self, index):
         item = self._model.itemFromIndex(index)
-        if item is None or item.rowCount() != 1:
+        if item is None:
+            return
+        self._setFolderExpanded(item, True)
+        if item.rowCount() != 1:
             return
         first_child = item.child(0)
         if first_child and first_child.data(Qt.ItemDataRole.UserRole) == _PLACEHOLDER_DATA:
             path = Path(item.data(Qt.ItemDataRole.UserRole))
             self._populateDir(item, path)
+
+    def _onCollapsed(self, index):
+        item = self._model.itemFromIndex(index)
+        if item is not None:
+            self._setFolderExpanded(item, False)
+
+    def _setFolderExpanded(self, item: QStandardItem, expanded: bool):
+        if not item.data(_IS_DIR_ROLE):
+            return
+        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        item.setText(self._folderLabel(path.name, True, expanded))
 
     def _capturedExpandedPaths(self, item: QStandardItem) -> set[str]:
         """Collect paths of currently expanded descendant folders under item."""
@@ -1306,18 +1412,32 @@ class MarkdownEditor(QMainWindow):
         self._outline_dock.hide()
         self._outline_timer.timeout.connect(self._updateOutline)
 
-        # File tree dock (left side, hidden by default)
+        # File tree dock (left side, hidden by default) — an "OPEN EDITORS"
+        # list sits above the folder tree, VSCode-style, so it stays clear
+        # which files are open even when many tabs are open at once.
+        self._open_editors = OpenEditorsPanel()
+        self._open_editors.activateTab.connect(self._activateOpenEditor)
+        self._open_editors.closeTab.connect(self._closeTab)
+
         self._file_tree = FileTreePanel()
         self._file_tree.setVisibleDotEntries(self._visible_dot_entries)
         self._file_tree.openFile.connect(self._openOrSwitchToFile)
         self._file_tree.requestOpenFolder.connect(self._openFolder)
+
+        sidebar_splitter = QSplitter(Qt.Orientation.Vertical)
+        sidebar_splitter.addWidget(self._open_editors)
+        sidebar_splitter.addWidget(self._file_tree)
+        sidebar_splitter.setStretchFactor(0, 0)
+        sidebar_splitter.setStretchFactor(1, 1)
+        sidebar_splitter.setSizes([120, 400])
+
         self._file_tree_dock = QDockWidget(self)
         self._file_tree_dock.setObjectName("filetree-dock")
         self._file_tree_dock.setTitleBarWidget(QWidget(self._file_tree_dock))
         self._file_tree_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self._file_tree_dock.setWidget(self._file_tree)
+        self._file_tree_dock.setWidget(sidebar_splitter)
         self._file_tree_dock.setMinimumWidth(200)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._file_tree_dock)
         self._file_tree_dock.hide()
@@ -1330,6 +1450,7 @@ class MarkdownEditor(QMainWindow):
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabCloseRequested.connect(self._closeTab)
         self.tabs.currentChanged.connect(self._onTabChanged)
+        self.tabs.tabBar().tabMoved.connect(lambda *_: self._refreshOpenEditors())
 
         # "+" new-tab button at the right corner of the tab bar
         new_tab_btn = QToolButton()
@@ -1586,7 +1707,30 @@ class MarkdownEditor(QMainWindow):
                 tab.editor.setPlainText(initial_content)
                 tab._modified = False
 
+        self._refreshOpenEditors()
         return tab
+
+    def _activateOpenEditor(self, idx: int):
+        self.tabs.setCurrentIndex(idx)
+
+    def _refreshOpenEditors(self):
+        """Rebuild the OPEN EDITORS list to match the current tabs."""
+        n = self.tabs.count()
+        names = [
+            Path(self.tabs.widget(i)._file).name if self.tabs.widget(i)._file else "untitled.md"
+            for i in range(n)
+        ]
+        dup_names = {name for name in names if names.count(name) > 1}
+
+        entries = []
+        for i in range(n):
+            tab = self.tabs.widget(i)
+            title = tab.tabTitle()
+            if names[i] in dup_names and tab._file:
+                title += f"  —  {Path(tab._file).resolve().parent.name}"
+            tooltip = str(Path(tab._file).resolve()) if tab._file else "未保存のファイル"
+            entries.append((title, tooltip))
+        self._open_editors.refresh(entries, self.tabs.currentIndex())
 
     def _onTabTitleChanged(self, tab, title):
         idx = self.tabs.indexOf(tab)
@@ -1594,6 +1738,7 @@ class MarkdownEditor(QMainWindow):
             self.tabs.setTabText(idx, title)
         if tab is self._curTab():
             self.setWindowTitle(f"Markdown Editor — {title}")
+        self._refreshOpenEditors()
 
     def _onTabChanged(self, idx):
         tab = self.tabs.widget(idx)
@@ -1602,6 +1747,7 @@ class MarkdownEditor(QMainWindow):
             self._updateStatus()
             self._updateOutline()
             self._updateFileTreeRoot()
+            self._refreshOpenEditors()
 
     def _newTab(self):
         self._addTab()
@@ -1613,7 +1759,9 @@ class MarkdownEditor(QMainWindow):
         tab.cleanup()
         self.tabs.removeTab(idx)
         if self.tabs.count() == 0:
-            self._addTab()  # always keep at least one tab
+            self._addTab()  # always keep at least one tab; refreshes the list itself
+        else:
+            self._refreshOpenEditors()
 
     def _closeCurrentTab(self):
         self._closeTab(self.tabs.currentIndex())
@@ -2008,7 +2156,7 @@ class MarkdownEditor(QMainWindow):
         for i in range(self.tabs.count()):
             self.tabs.widget(i).applyTheme(self._dark)
 
-        r_arrow, d_arrow = _branch_arrow_paths(t["text2"])
+        r_arrow, d_arrow = _branch_arrow_paths(t["text"])
         r_arrow = r_arrow.replace("\\", "/")
         d_arrow = d_arrow.replace("\\", "/")
 
@@ -2152,6 +2300,27 @@ class MarkdownEditor(QMainWindow):
             QListWidget#outline-list::item:hover:!selected {{
                 background: {t["surface2"]}; color: {t["accent"]};
             }}
+            QListWidget#open-editors-list {{
+                background: {t["surface"]}; color: {t["text"]};
+                border: none; outline: none;
+                font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+                font-size: 11px;
+            }}
+            QListWidget#open-editors-list::item {{
+                padding: 3px 10px; border-radius: 3px;
+            }}
+            QListWidget#open-editors-list::item:selected {{
+                background: {t["accent"]}; color: #fff;
+            }}
+            QListWidget#open-editors-list::item:hover:!selected {{
+                background: {t["surface2"]}; color: {t["accent"]};
+            }}
+            QLabel#open-editor-label {{ background: transparent; color: {t["text"]}; }}
+            QToolButton#open-editor-close-btn {{
+                background: transparent; color: {t["text2"]};
+                border: none; padding: 0 2px; font-size: 10px;
+            }}
+            QToolButton#open-editor-close-btn:hover {{ color: {t["accent"]}; }}
             QDialog {{ background: {t["surface"]}; color: {t["text"]}; }}
             QLineEdit {{
                 background: {t["surface2"]}; color: {t["text"]};
