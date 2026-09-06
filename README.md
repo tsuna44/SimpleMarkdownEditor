@@ -21,7 +21,7 @@ Python/PySide6 製のMarkdownエディタ。Mermaid・PlantUMLのインライン
 - **印刷** — システムプリンタへ直接印刷（Ctrl+P）
 - **Drag & Drop** — ファイルをウィンドウにドロップして開く
 - **最近使ったファイル** — 最大10件を記録、File メニューから再オープン
-- **外部ファイル変更の自動リロード** — 他のエディタで保存されたときにコンテンツを自動更新
+- **外部ファイル変更の検知** — 他のエディタで保存されるとバナーで通知（既定）。F5 / Ctrl+R でいつでも再読み込み。ネットワーク共有上のファイルにも対応（ポーリング併用）
 - **行番号ガター** — エディタ左端に行番号を表示
 - **フォントサイズ変更** — ツールバーのA−/A+ボタンでリアルタイム調整
 
@@ -55,6 +55,7 @@ python markdown_editor.py [file.md]
 |---|---|
 | 新規タブ | Ctrl+T |
 | ファイルを開く | Ctrl+O |
+| 再読み込み | F5 / Ctrl+R |
 | 保存 | Ctrl+S |
 | PDF エクスポート | Ctrl+Shift+E |
 | 印刷 | Ctrl+P |
@@ -80,7 +81,7 @@ Python/
   requirements.txt
 vendor/
   mermaid.min.js       # Mermaid ライブラリ
-  elkjs/               # elkjs レイアウトエンジン
+  elk.bundled.js       # elkjs レイアウトエンジン
   plantuml.jar         # PlantUML JAR（バンドル版）
   VERSIONS.json        # バンドルライブラリのバージョン情報
 ```

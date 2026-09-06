@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import markdown
@@ -86,6 +87,67 @@ def _read_text_file(path: str, encoding: str):
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
+# ── External change detection ────────────────────────────────────────────────
+
+# "notify" = show a banner and let the user reload;
+# "auto"   = reload silently when the buffer has no unsaved edits.
+_EXTERNAL_CHANGE_ACTION = "notify"
+
+
+def _apply_external_settings(action: str):
+    global _EXTERNAL_CHANGE_ACTION
+    _EXTERNAL_CHANGE_ACTION = action if action in ("notify", "auto") else "notify"
+
+
+def _file_stamp(path: str):
+    """Return (mtime_ns, size) for *path*, or None if it cannot be stat'ed.
+
+    Used to tell "someone else changed the file" from "we just wrote it
+    ourselves", which is more reliable than a flag because QFileSystemWatcher
+    delivers its signal asynchronously, after the save call has returned.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+_REMOTE_ROOT_CACHE: dict[str, bool] = {}
+
+
+def _is_remote_path(path: str) -> bool:
+    """True if *path* lives on a Windows network share (UNC or mapped drive).
+
+    QFileSystemWatcher relies on OS change notifications that are not delivered
+    reliably over SMB, and registering watches there costs network round trips,
+    so remote paths are polled (see EditorTab.checkExternalChange) instead of
+    watched. Always False on non-Windows platforms.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        p = os.path.abspath(path)
+    except OSError:
+        return False
+    if p.startswith("\\\\"):
+        return True
+    drive = os.path.splitdrive(p)[0]
+    if len(drive) != 2 or not drive.endswith(":"):
+        return False
+    key = drive.upper()
+    if key in _REMOTE_ROOT_CACHE:
+        return _REMOTE_ROOT_CACHE[key]
+    try:
+        import ctypes
+        DRIVE_REMOTE = 4
+        remote = ctypes.windll.kernel32.GetDriveTypeW(key + "\\") == DRIVE_REMOTE
+    except Exception:
+        remote = False
+    _REMOTE_ROOT_CACHE[key] = remote
+    return remote
+
+
 _JVM_MEM          = "1g"
 _PUML_SIZE        = 32768
 _PUML_RENDER_MODE = "auto"   # "auto" | "manual"
@@ -157,7 +219,7 @@ def _detect_plantuml():
             probe = b"@startuml\nA -> B\n@enduml\n"
             r = subprocess.run(
                 cmd + ["-tsvg", "-pipe", "-charset", "UTF-8"],
-                input=probe, capture_output=True, timeout=10,
+                input=probe, capture_output=True, timeout=5,
             )
             if r.returncode == 0 and b"<svg" in r.stdout:
                 _PUML_CMD = cmd
@@ -179,6 +241,21 @@ def _render_plantuml_svg(code: str) -> str:
 
 
 def _do_render_plantuml(src: str) -> str:
+    """Render *src* to SVG.
+
+    NOTE: this runs the PlantUML process synchronously on the GUI thread, so
+    the window is unresponsive while the JVM starts and renders. That is why
+    the render mode defaults to "manual" on Windows (see MarkdownEditor
+    .__init__); an hourglass cursor at least makes the wait explicit.
+    """
+    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+        return _do_render_plantuml_impl(src)
+    finally:
+        QApplication.restoreOverrideCursor()
+
+
+def _do_render_plantuml_impl(src: str) -> str:
     cmd = _detect_plantuml()
     if cmd is None:
         return (
@@ -215,10 +292,14 @@ from PySide6.QtWidgets import (
     QToolButton, QMenu, QListWidget, QListWidgetItem, QDockWidget,
     QTreeView, QDialog, QFormLayout, QComboBox,
     QDialogButtonBox, QStyledItemDelegate, QLineEdit, QInputDialog,
+    QPushButton,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
-from PySide6.QtCore import Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths, QFileSystemWatcher, QSize
+from PySide6.QtCore import (
+    Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths,
+    QFileSystemWatcher, QSize, QEvent,
+)
 from PySide6.QtGui import (
     QKeySequence, QTextCursor,
     QAction, QPageLayout, QPageSize,
@@ -536,6 +617,13 @@ class FileTreePanel(QWidget):
         self._visible_dot_entries: set[str] = set()
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._onDirectoryChanged)
+        # A single burst of file operations makes the OS emit many
+        # directoryChanged signals; re-scanning the tree on each one blocks the
+        # GUI thread with one stat per entry, which is painfully slow on a
+        # network share. Collect the paths and rescan once.
+        self._pending_dirs: set[str] = set()
+        self._rescan_timer = QTimer(self, singleShot=True, interval=400)
+        self._rescan_timer.timeout.connect(self._rescanPending)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -618,8 +706,11 @@ class FileTreePanel(QWidget):
         if watched:
             self._watcher.removePaths(watched)
 
-    def _makeItem(self, path: Path) -> QStandardItem:
-        is_dir = path.is_dir()
+    def _makeItem(self, path: Path, is_dir: bool | None = None) -> QStandardItem:
+        # is_dir is passed in by callers that already know it (os.scandir gives
+        # it for free); querying it again would cost another round trip.
+        if is_dir is None:
+            is_dir = path.is_dir()
         item = QStandardItem(self._folderLabel(path.name, is_dir, expanded=False))
         item.setData(str(path), Qt.ItemDataRole.UserRole)
         item.setData(is_dir, _IS_DIR_ROLE)
@@ -642,25 +733,32 @@ class FileTreePanel(QWidget):
     def _populateDir(self, item: QStandardItem, path: Path):
         sp = str(path)
         self._path_to_item[sp] = item
-        self._watcher.addPath(sp)
+        # Network shares do not deliver change notifications reliably, and each
+        # watch costs a round trip — refresh those from the context menu instead.
+        if not _is_remote_path(sp):
+            self._watcher.addPath(sp)
         item.removeRows(0, item.rowCount())
         try:
-            entries = sorted(path.iterdir(),
-                             key=lambda e: (e.is_file(), e.name.lower()))
-        except PermissionError:
+            # os.scandir caches the directory-entry type, so is_dir() below
+            # needs no extra stat call per entry (Path.iterdir() does).
+            with os.scandir(sp) as it:
+                entries = [(e.name, e.is_dir()) for e in it]
+        except OSError:
             return
-        for entry in entries:
-            if entry.name.startswith('.') and entry.name not in self._visible_dot_entries:
+        entries.sort(key=lambda e: (not e[1], e[0].lower()))
+        for name, is_dir in entries:
+            if name.startswith('.') and name not in self._visible_dot_entries:
                 continue
-            if entry.is_dir():
-                child = self._makeItem(entry)
+            entry = path / name
+            if is_dir:
+                child = self._makeItem(entry, is_dir=True)
                 placeholder = QStandardItem()
                 placeholder.setData(_PLACEHOLDER_DATA, Qt.ItemDataRole.UserRole)
                 placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
                 child.appendRow(placeholder)
                 item.appendRow(child)
             elif entry.suffix.lower() in _MARKDOWN_EXTS:
-                child = self._makeItem(entry)
+                child = self._makeItem(entry, is_dir=False)
                 item.appendRow(child)
 
     def _onExpanded(self, index):
@@ -734,6 +832,16 @@ class FileTreePanel(QWidget):
                 self._tree.expand(self._model.indexFromItem(item))
 
     def _onDirectoryChanged(self, path: str):
+        self._pending_dirs.add(path)
+        self._rescan_timer.start()
+
+    def _rescanPending(self):
+        pending, self._pending_dirs = self._pending_dirs, set()
+        for path in pending:
+            self.refreshPath(path)
+
+    def refreshPath(self, path: str):
+        """Re-scan one folder node, keeping its expanded sub-folders expanded."""
         item = self._path_to_item.get(path)
         if item is None:
             return
@@ -761,6 +869,9 @@ class FileTreePanel(QWidget):
         if not path or path in (_SEP_DATA, _PLACEHOLDER_DATA):
             return
         copy_act = menu.addAction("📋  パスをコピー")
+        # Remote folders are not watched (see _populateDir), so an explicit
+        # refresh is the only way to pick up changes made on the server.
+        refresh_act = menu.addAction("🔄  更新")
         remove_act = None
         if path in self._roots:
             menu.addSeparator()
@@ -770,6 +881,9 @@ class FileTreePanel(QWidget):
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen == copy_act:
             QApplication.clipboard().setText(path)
+        elif chosen is not None and chosen == refresh_act:
+            self.refreshPath(path if path in self._path_to_item
+                             else str(Path(path).parent))
         elif chosen is not None and chosen == remove_act:
             self.removeRootPath(path)
         elif chosen is not None and chosen == open_act:
@@ -777,6 +891,13 @@ class FileTreePanel(QWidget):
 
 
 _RECENT_MAX = 10
+
+# External-change polling: normal cadence, and the backoff used when a stat()
+# takes long enough to be felt (an unresponsive share), so a dead server slows
+# the editor down once instead of every tick.
+_EXTCHECK_INTERVAL_MS = 3000
+_EXTCHECK_SLOW_INTERVAL_MS = 30000
+_EXTCHECK_SLOW_SECONDS = 0.5
 
 _DEFAULT_MD = """\
 # Simple Markdown Editor
@@ -846,10 +967,56 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class _ExternalChangeBar(QWidget):
+    """Banner shown at the top of a tab when the file changed on disk.
+
+    Replacing the buffer without asking used to throw away unsaved edits and
+    the undo history, so the change is only applied when the user says so.
+    """
+
+    reloadRequested = Signal()
+    dismissed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("external-change-bar")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 3, 6, 3)
+        lay.setSpacing(8)
+
+        self._label = QLabel()
+        self._label.setObjectName("external-change-label")
+        lay.addWidget(self._label, 1)
+
+        reload_btn = QPushButton("🔄  再読み込み")
+        reload_btn.setObjectName("external-change-reload")
+        reload_btn.clicked.connect(self.reloadRequested)
+        lay.addWidget(reload_btn)
+
+        close_btn = QToolButton()
+        close_btn.setText("✕")
+        close_btn.setObjectName("external-change-close")
+        close_btn.setToolTip("この通知を閉じる")
+        close_btn.clicked.connect(self.dismissed)
+        lay.addWidget(close_btn)
+
+        self.hide()
+
+    def notify(self, modified: bool):
+        self._label.setText(
+            "⚠  このファイルは他のエディタで変更されました。"
+            + ("未保存の変更は再読み込みで破棄されます。" if modified
+               else "再読み込みすると最新の内容になります。")
+        )
+        self.show()
+
+
 class EditorTab(QWidget):
     """A single editor + preview pane that lives inside a QTabWidget tab."""
 
-    titleChanged = Signal(str)  # emitted when filename or modified-flag changes
+    titleChanged = Signal(str)      # emitted when filename or modified-flag changes
+    externalChanged = Signal(str)   # emitted with the path when disk content differs
+    reloaded = Signal(str)          # emitted with the path after a successful reload
 
     def __init__(self, dark=False, font_size=14, parent=None):
         super().__init__(parent)
@@ -862,6 +1029,8 @@ class EditorTab(QWidget):
         self._tmp_html = None     # str | None  (temp file for preview)
         self._search_dlg = None   # SearchDialog | None
         self._saving = False      # True while we are writing the file ourselves
+        self._disk_stamp = None   # (mtime_ns, size) of the content we last read/wrote
+        self._watch_enabled = False   # False for network paths — polled instead
 
         self._preview_timer = QTimer(singleShot=True, interval=300)
         self._preview_timer.timeout.connect(self._updatePreview)
@@ -877,6 +1046,11 @@ class EditorTab(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
+
+        self._change_bar = _ExternalChangeBar(self)
+        self._change_bar.reloadRequested.connect(self.reloadFromDisk)
+        self._change_bar.dismissed.connect(self._change_bar.hide)
+        lay.addWidget(self._change_bar)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -932,8 +1106,13 @@ class EditorTab(QWidget):
     # ── text change
 
     def _onTextChanged(self):
+        # Only signal on the clean → modified transition: the title text does
+        # not change afterwards, and each emission rebuilds the OPEN EDITORS
+        # list for every tab, which used to run on every keystroke.
+        was_modified = self._modified
         self._modified = True
-        self._refreshTitle()
+        if not was_modified:
+            self._refreshTitle()
         if _PUML_RENDER_MODE == "auto":
             text = self.editor.toPlainText()
             has_uncached_puml = bool(re.search(r'```plantuml\n', text)) and any(
@@ -1075,14 +1254,23 @@ if (typeof mermaid !== 'undefined') {{
 
     # ── file operations
 
-    def loadFile(self, path: str, encoding: str = None):
-        if encoding is None:
-            with open(path, 'rb') as f:
-                raw = f.read()
-            encoding = _detect_encoding(raw, last_used=self._encoding)
+    def loadFile(self, path: str, encoding: str = None) -> bool:
+        try:
             if encoding is None:
-                encoding = self._promptEncodingChoice(path)
-        content, newline = _read_text_file(path, encoding)
+                with open(path, 'rb') as f:
+                    raw = f.read()
+                encoding = _detect_encoding(raw, last_used=self._encoding)
+                if encoding is None:
+                    encoding = self._promptEncodingChoice(path)
+            content, newline = _read_text_file(path, encoding)
+        except OSError as e:
+            # A dropped network share raises here; showing it beats an
+            # unhandled exception inside a Qt slot.
+            QMessageBox.warning(
+                self, "読み込みエラー",
+                f"「{Path(path).name}」を読み込めませんでした。\n\n{e}",
+            )
+            return False
         self._encoding = encoding
         self._newline = newline
         if self._file and self._file in self._watcher.files():
@@ -1091,8 +1279,12 @@ if (typeof mermaid !== 'undefined') {{
         self._modified = False
         self.editor.setPlainText(content)
         self._modified = False
-        self._watcher.addPath(path)
+        self._disk_stamp = _file_stamp(path)
+        self._watch_enabled = not _is_remote_path(path)
+        self._ensureWatched()
+        self._change_bar.hide()
         self._refreshTitle()
+        return True
 
     def _promptEncodingChoice(self, path: str) -> str:
         """Ask the user for the file's encoding when auto-detection fails."""
@@ -1125,34 +1317,116 @@ if (typeof mermaid !== 'undefined') {{
             )
             return False
         self._saving = True
-        with open(self._file, 'wb') as f:
-            f.write(data)
+        try:
+            with open(self._file, 'wb') as f:
+                f.write(data)
+        except OSError as e:
+            self._saving = False
+            QMessageBox.warning(
+                self, "保存エラー",
+                f"「{Path(self._file).name}」を保存できませんでした。\n\n{e}",
+            )
+            return False
+        # Record what we just wrote before clearing the flag: the watcher's
+        # signal arrives later, through the event loop, so the flag alone
+        # cannot tell our own save apart from someone else's.
+        self._disk_stamp = _file_stamp(self._file)
         self._saving = False
-        # Some editors replace the file (unlink + create), re-add after save
-        if self._file not in self._watcher.files():
-            self._watcher.addPath(self._file)
+        # Some editors replace the file (unlink + create), re-add after save.
+        # Re-evaluating _watch_enabled also arms the watcher after "Save As",
+        # where the tab gets a path for the first time.
+        self._watch_enabled = not _is_remote_path(self._file)
+        self._ensureWatched()
         self._modified = False
+        self._change_bar.hide()
         self._refreshTitle()
         return True
 
+    # ── external change detection / reload
+
+    def _ensureWatched(self):
+        """(Re-)register the current file with the watcher.
+
+        Qt drops the watch when a file is removed, which is what an editor
+        doing an atomic save (write temp + rename) looks like, so the watch has
+        to be re-armed or no further change is ever reported.
+        """
+        if not self._file or not self._watch_enabled:
+            return
+        if self._file not in self._watcher.files():
+            self._watcher.addPath(self._file)
+
+    def checkExternalChange(self) -> bool:
+        """Poll the file's stamp and report a change. Costs a single stat()."""
+        if not self._file or self._saving:
+            return False
+        stamp = _file_stamp(self._file)
+        if stamp is None:
+            # Deleted, or the share is offline — keep the buffer as it is.
+            return False
+        self._ensureWatched()
+        if self._disk_stamp is None:
+            self._disk_stamp = stamp
+            return False
+        if stamp == self._disk_stamp:
+            return False
+        self._disk_stamp = stamp
+        self._onExternalChangeDetected()
+        return True
+
     def _onExternalFileChange(self, path: str):
-        if self._saving:
+        if path != self._file:
             return
-        if not Path(path).exists():
+        # Verify against the stamp rather than trusting the signal: it also
+        # fires for our own saves and for truncate-then-write sequences.
+        self.checkExternalChange()
+
+    def _onExternalChangeDetected(self):
+        if _EXTERNAL_CHANGE_ACTION == "auto" and not self._modified:
+            self.reloadFromDisk()
             return
-        # Re-add path in case the editor replaced the file inode
-        if path not in self._watcher.files():
-            self._watcher.addPath(path)
-        content, newline = _read_text_file(path, self._encoding)
+        self._change_bar.notify(self._modified)
+        self.externalChanged.emit(self._file)
+
+    def reloadFromDisk(self, encoding: str = None) -> bool:
+        """Re-read the current file, keeping the cursor and scroll position."""
+        if not self._file:
+            return False
+        enc = encoding or self._encoding
+        try:
+            content, newline = _read_text_file(self._file, enc)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "再読み込みエラー",
+                f"「{Path(self._file).name}」を読み込めませんでした。\n\n{e}",
+            )
+            return False
+
+        cursor = self.editor.textCursor()
+        line, col = cursor.blockNumber(), cursor.columnNumber()
+        scroll = self.editor.verticalScrollBar().value()
+
+        self._encoding = enc
         self._newline = newline
-        cursor_pos = self.editor.textCursor().position()
-        self._modified = False
         self.editor.setPlainText(content)
         self._modified = False
-        cursor = self.editor.textCursor()
-        cursor.setPosition(min(cursor_pos, len(content)))
-        self.editor.setTextCursor(cursor)
+
+        doc = self.editor.document()
+        block = doc.findBlockByNumber(min(line, doc.blockCount() - 1))
+        c = self.editor.textCursor()
+        c.setPosition(block.position() + min(col, max(block.length() - 1, 0)))
+        self.editor.setTextCursor(c)
+        # The scrollbar range is only valid once the new document is laid out.
+        QTimer.singleShot(0, lambda: self.editor.verticalScrollBar().setValue(
+            min(scroll, self.editor.verticalScrollBar().maximum())))
+
+        self._disk_stamp = _file_stamp(self._file)
+        self._watch_enabled = not _is_remote_path(self._file)
+        self._ensureWatched()
+        self._change_bar.hide()
         self._refreshTitle()
+        self.reloaded.emit(self._file)
+        return True
 
     # ── insert
 
@@ -1321,6 +1595,9 @@ if (typeof mermaid !== 'undefined') {{
 
     def cleanup(self):
         self._preview_timer.stop()
+        watched = self._watcher.files()
+        if watched:
+            self._watcher.removePaths(watched)
         if self._tmp_html and os.path.exists(self._tmp_html):
             os.unlink(self._tmp_html)
         self._tmp_html = None
@@ -1345,15 +1622,27 @@ class MarkdownEditor(QMainWindow):
         self._visible_dot_entries: list[str] = json.loads(
             self._settings.value("visible_dot_entries", "[]")
         )
+        # PlantUML renders synchronously on the GUI thread, and on Windows the
+        # JVM start-up cost turns every preview refresh into a visible freeze —
+        # so manual rendering is the default there.
         _apply_puml_settings(
             self._settings.value("puml_jvm_mem",      "1g"),
             int(self._settings.value("puml_limit_size", 32768)),
-            self._settings.value("puml_render_mode",  "auto"),
+            self._settings.value("puml_render_mode",
+                                 "manual" if os.name == "nt" else "auto"),
             int(self._settings.value("png_default_scale", 2)),
         )
+        _apply_external_settings(
+            self._settings.value("external_change_action", "notify"))
 
         self._outline_timer = QTimer(singleShot=True, interval=300)
         self._folder_manually_set = False
+
+        # Polling backstop for external changes: QFileSystemWatcher misses them
+        # on network shares, and a single stat() per tick is cheap.
+        self._extcheck_timer = QTimer(self, interval=_EXTCHECK_INTERVAL_MS)
+        self._extcheck_timer.timeout.connect(self._checkExternalChanges)
+        self._extcheck_timer.start()
 
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
@@ -1491,6 +1780,13 @@ class MarkdownEditor(QMainWindow):
         file_menu.addMenu(self._recent_menu)
         self._recent_menu.aboutToShow.connect(self._buildRecentMenu)
         file_menu.addSeparator()
+        self._reloadMenuAct = QAction("🔄  再読み込み", self)
+        self._reloadMenuAct.setShortcuts([QKeySequence("F5"), QKeySequence("Ctrl+R")])
+        self._reloadMenuAct.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._reloadMenuAct.triggered.connect(self._reloadCurrentFile)
+        self.addAction(self._reloadMenuAct)  # keep the shortcut alive while the menu is closed
+        file_menu.addAction(self._reloadMenuAct)
+        file_menu.addSeparator()
         file_menu.addAction("💾  Save",      self._saveFile).setShortcut(QKeySequence("Ctrl+S"))
         file_menu.addAction("💾  Save As…",  self._saveFileAs)
         file_menu.addSeparator()
@@ -1509,6 +1805,12 @@ class MarkdownEditor(QMainWindow):
         self._file_btn.setMenu(file_menu)
         self._file_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tb1.addWidget(self._file_btn)
+
+        tb1.addSeparator()
+        # No shortcut here: reload_act above already owns F5 / Ctrl+R
+        # application-wide, and a second action with the same key would make
+        # the shortcut ambiguous.
+        self._reloadAct = act(tb1, "🔄", "再読み込み (F5)", self._reloadCurrentFile)
 
         tb1.addSeparator()
         self._themeAct = act(tb1, "☀", "テーマ切り替え", self._toggleTheme)
@@ -1612,7 +1914,7 @@ class MarkdownEditor(QMainWindow):
         SIZE_OPTIONS = [4096, 8192, 16384, 32768, 65536]
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Settings — PlantUML")
+        dlg.setWindowTitle("Settings")
         dlg.setMinimumWidth(320)
         form = QFormLayout(dlg)
 
@@ -1645,6 +1947,17 @@ class MarkdownEditor(QMainWindow):
             png_box.setCurrentIndex(cur_png_idx)
         form.addRow("PNG デフォルト解像度:", png_box)
 
+        ext_box = QComboBox()
+        ext_box.addItem("通知のみ（バナーから再読み込み）", "notify")
+        ext_box.addItem("自動で再読み込み（未変更のときだけ）", "auto")
+        cur_ext_idx = ext_box.findData(_EXTERNAL_CHANGE_ACTION)
+        if cur_ext_idx >= 0:
+            ext_box.setCurrentIndex(cur_ext_idx)
+        ext_box.setToolTip(
+            "他のエディタでファイルが変更されたときの動作。\n"
+            "未保存の変更があるときは、どちらの設定でも自動上書きはしません。")
+        form.addRow("外部変更時の動作:", ext_box)
+
         dot_edit = QLineEdit(", ".join(self._visible_dot_entries))
         dot_edit.setPlaceholderText(".obsidian, .templates")
         dot_edit.setToolTip("ファイルツリーに表示する「.」始まりのフォルダ／ファイル名（カンマ区切り）")
@@ -1668,6 +1981,9 @@ class MarkdownEditor(QMainWindow):
         self._settings.setValue("puml_limit_size",   size)
         self._settings.setValue("puml_render_mode",  mode)
         self._settings.setValue("png_default_scale", png_scale)
+        ext_action = ext_box.currentData()
+        _apply_external_settings(ext_action)
+        self._settings.setValue("external_change_action", ext_action)
         self._visible_dot_entries = [
             n if n.startswith('.') else f".{n}"
             for n in (s.strip() for s in dot_edit.text().split(","))
@@ -1690,6 +2006,8 @@ class MarkdownEditor(QMainWindow):
         """Create a new EditorTab, add it to the tab widget, and return it."""
         tab = EditorTab(dark=self._dark, font_size=self._font_size)
         tab.titleChanged.connect(lambda title, t=tab: self._onTabTitleChanged(t, title))
+        tab.externalChanged.connect(self._onTabExternalChanged)
+        tab.reloaded.connect(self._onTabReloaded)
         tab.editor.cursorPositionChanged.connect(self._updateStatus)
         tab.editor.textChanged.connect(self._updateStatus)
         tab.editor.textChanged.connect(lambda t=tab: self._onTabTextChanged(t))
@@ -1726,9 +2044,11 @@ class MarkdownEditor(QMainWindow):
         for i in range(n):
             tab = self.tabs.widget(i)
             title = tab.tabTitle()
+            # Paths are already absolute when the tab is opened; resolve() here
+            # would hit the filesystem once per tab on every refresh.
             if names[i] in dup_names and tab._file:
-                title += f"  —  {Path(tab._file).resolve().parent.name}"
-            tooltip = str(Path(tab._file).resolve()) if tab._file else "未保存のファイル"
+                title += f"  —  {Path(tab._file).parent.name}"
+            tooltip = tab._file or "未保存のファイル"
             entries.append((title, tooltip))
         self._open_editors.refresh(entries, self.tabs.currentIndex())
 
@@ -1738,12 +2058,22 @@ class MarkdownEditor(QMainWindow):
             self.tabs.setTabText(idx, title)
         if tab is self._curTab():
             self.setWindowTitle(f"Markdown Editor — {title}")
+            self._updateReloadAction()
         self._refreshOpenEditors()
+
+    def _updateReloadAction(self):
+        """Reload only makes sense once the tab is backed by a file on disk."""
+        enabled = bool(self._curTab() and self._curTab()._file)
+        self._reloadAct.setEnabled(enabled)
+        self._reloadMenuAct.setEnabled(enabled)
 
     def _onTabChanged(self, idx):
         tab = self.tabs.widget(idx)
         if tab:
+            # Only the active tab is polled, so catch up on switching to one.
+            tab.checkExternalChange()
             self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
+            self._updateReloadAction()
             self._updateStatus()
             self._updateOutline()
             self._updateFileTreeRoot()
@@ -1776,11 +2106,15 @@ class MarkdownEditor(QMainWindow):
 
     def _openOrSwitchToFile(self, path: str):
         """Open *path* in the editor, reusing an existing tab if already open."""
-        abs_path = str(Path(path).resolve())
+        # abspath/normcase instead of resolve(): comparing open tabs must not
+        # cost a filesystem round trip per tab (symlinks to the same file are
+        # treated as different files, which is the cheaper trade-off here).
+        abs_path = os.path.abspath(path)
+        key = os.path.normcase(abs_path)
         # Check if any tab already has this file open
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
-            if tab and tab._file and str(Path(tab._file).resolve()) == abs_path:
+            if tab and tab._file and os.path.normcase(os.path.abspath(tab._file)) == key:
                 self.tabs.setCurrentIndex(i)
                 self._addRecentFile(abs_path)
                 return
@@ -1824,6 +2158,59 @@ class MarkdownEditor(QMainWindow):
             return
         tab.saveFile()
         self.setWindowTitle(f"Markdown Editor — {tab.tabTitle()}")
+
+    def _reloadCurrentFile(self):
+        """Re-read the active tab's file from disk (F5 / Ctrl+R)."""
+        tab = self._curTab()
+        if not tab:
+            return
+        if not tab._file:
+            self.statusBar().showMessage("保存されていないファイルは再読み込みできません", 3000)
+            return
+        if tab._modified:
+            r = QMessageBox.question(
+                self, "確認",
+                f"「{Path(tab._file).name}」の未保存の変更は破棄されます。\n"
+                f"ディスクの内容で再読み込みしますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        if tab.reloadFromDisk():
+            self._updateStatus()
+            self._updateOutline()
+
+    def _checkExternalChanges(self):
+        """Poll the active tab for an out-of-band change to its file."""
+        tab = self._curTab()
+        if not tab:
+            return
+        started = time.monotonic()
+        tab.checkExternalChange()
+        elapsed = time.monotonic() - started
+        # A slow stat() means the share is not answering; back off so the GUI
+        # thread is not blocked again every few seconds.
+        interval = (_EXTCHECK_SLOW_INTERVAL_MS if elapsed > _EXTCHECK_SLOW_SECONDS
+                    else _EXTCHECK_INTERVAL_MS)
+        if self._extcheck_timer.interval() != interval:
+            self._extcheck_timer.setInterval(interval)
+
+    def _onTabExternalChanged(self, path: str):
+        self.statusBar().showMessage(
+            f"外部で変更されました: {Path(path).name} — F5 で再読み込み", 8000)
+
+    def _onTabReloaded(self, path: str):
+        self.statusBar().showMessage(f"再読み込みしました: {Path(path).name}", 3000)
+        self._updateStatus()
+        self._updateOutline()
+
+    def changeEvent(self, event):
+        # Returning to the window is the moment the user is most likely to care
+        # whether the file changed while they were away.
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            QTimer.singleShot(0, self._checkExternalChanges)
+        super().changeEvent(event)
 
     def _saveFileAs(self):
         tab = self._curTab()
@@ -2012,8 +2399,8 @@ class MarkdownEditor(QMainWindow):
             )
             if r != QMessageBox.StandardButton.Yes:
                 return
-        tab.loadFile(tab._file, encoding=encoding)
-        self._settings.setValue("last_encoding", encoding)
+        if tab.reloadFromDisk(encoding=encoding):
+            self._settings.setValue("last_encoding", encoding)
         self._updateStatus()
 
     def _showNewlineMenu(self):
@@ -2087,7 +2474,7 @@ class MarkdownEditor(QMainWindow):
     # ── Recent files
 
     def _addRecentFile(self, path: str):
-        path = str(Path(path).resolve())
+        path = os.path.abspath(path)
         if path in self._recent_files:
             self._recent_files.remove(path)
         self._recent_files.insert(0, path)
@@ -2175,6 +2562,11 @@ class MarkdownEditor(QMainWindow):
             }}
             QToolBar#main-tb QToolButton:hover, QToolBar#edit-tb QToolButton:hover {{
                 background: {t["surface2"]}; color: {t["accent"]};
+            }}
+            /* The rules above set an explicit color, which Qt would otherwise
+               keep for disabled buttons too — dim them so the state is visible. */
+            QToolBar#main-tb QToolButton:disabled, QToolBar#edit-tb QToolButton:disabled {{
+                background: transparent; color: {t["gutter"]};
             }}
             QToolBar#main-tb QToolButton#file-btn {{
                 background: {"#1e3550" if self._dark else "#ddeeff"};
@@ -2333,6 +2725,25 @@ class MarkdownEditor(QMainWindow):
             }}
             QPushButton:hover {{ background: {t["accent_bg"]}; color: {t["accent"]}; }}
             QCheckBox {{ color: {t["text2"]}; }}
+            QWidget#external-change-bar {{
+                background: {"#4a3a1e" if self._dark else "#fff4d6"};
+                border-bottom: 1px solid {"#7a6030" if self._dark else "#e0c078"};
+            }}
+            QLabel#external-change-label {{
+                background: transparent;
+                color: {"#f0d090" if self._dark else "#7a5a10"};
+                font-size: 11px;
+            }}
+            QPushButton#external-change-reload {{
+                background: #2a72c0; color: #fff; border: none;
+                border-radius: 4px; padding: 3px 10px; font-size: 11px;
+            }}
+            QPushButton#external-change-reload:hover {{ background: #3a86d8; }}
+            QToolButton#external-change-close {{
+                background: transparent; border: none;
+                color: {"#f0d090" if self._dark else "#7a5a10"};
+                padding: 0 4px; font-size: 11px;
+            }}
         """)
 
     def _fontSizeUp(self):
@@ -2357,6 +2768,7 @@ class MarkdownEditor(QMainWindow):
             if not self._confirmDiscard(self.tabs.widget(i)):
                 event.ignore()
                 return
+        self._extcheck_timer.stop()
         for i in range(self.tabs.count()):
             self.tabs.widget(i).cleanup()
         event.accept()

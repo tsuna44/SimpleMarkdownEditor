@@ -60,7 +60,10 @@ python -m PyInstaller \
   --hidden-import PySide6.QtWebEngineWidgets \
   --hidden-import PySide6.QtWebEngineCore \
   --hidden-import PySide6.QtWebEngineQuick \
-  --add-data "../vendor:vendor" \
+  --add-data "../vendor/mermaid.min.js:vendor" \
+  --add-data "../vendor/elk.bundled.js:vendor" \
+  --add-data "../vendor/VERSIONS.json:vendor" \
+  --add-data "../vendor/plantuml.jar:." \
   markdown_editor.py
 ```
 
@@ -74,21 +77,25 @@ python -m PyInstaller \
 dist/SimpleMarkdownEditor/          ← このフォルダごとzip等で配布
 ├── SimpleMarkdownEditor            ← 実行ファイル (macOS/Linux)
 │                                   ← SimpleMarkdownEditor.exe (Windows)
-├── PySide6/
-│   ├── Qt/lib/                     ← Qt フレームワーク (.dylib / .so / .dll)
-│   │   ├── QtCore.framework/       ← ← ユーザーが差し替え可能なファイル群
-│   │   ├── QtGui.framework/
-│   │   └── ...
-│   └── plugins/
-├── vendor/
-│   ├── mermaid.min.js              ← Mermaid ライブラリ
-│   ├── elkjs/                      ← elkjs レイアウトエンジン
-│   ├── plantuml.jar                ← PlantUML JAR
-│   └── VERSIONS.json               ← バンドルライブラリのバージョン情報
-├── markdown/
-├── pygments/
-└── _internal/                      ← PyInstaller ランタイム
+└── _internal/                      ← PyInstaller ランタイム（依存物一式）
+    ├── PySide6/
+    │   ├── Qt/lib/                 ← Qt フレームワーク (.dylib / .so / .dll)
+    │   │   ├── QtCore.framework/   ← ← ユーザーが差し替え可能なファイル群
+    │   │   ├── QtGui.framework/
+    │   │   └── ...
+    │   └── plugins/
+    ├── vendor/
+    │   ├── mermaid.min.js          ← Mermaid ライブラリ
+    │   ├── elk.bundled.js          ← elkjs レイアウトエンジン
+    │   └── VERSIONS.json           ← バンドルライブラリのバージョン情報
+    ├── plantuml.jar                ← PlantUML JAR（vendor/ ではなくルート直下）
+    ├── markdown/
+    └── pygments/
 ```
+
+> `plantuml.jar` だけ `vendor/` の外に置くのは、実行時の参照先が `sys._MEIPASS` 直下だからです
+> （[main_window.py の `_puml_jar_path()`](../main_window.py)）。`--add-data` の第 2 引数を変更する場合は
+> 参照側も合わせて修正してください。
 
 Qt / PySide6 のライブラリが個別ファイルとして存在するため、エンドユーザーは互換バージョンのライブラリを差し替えることができます。
 

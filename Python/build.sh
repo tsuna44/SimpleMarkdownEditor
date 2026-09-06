@@ -73,6 +73,11 @@ if [[ ! -f "$VENDOR_DIR/mermaid.min.js" ]]; then
   "$PYTHON" "$SCRIPT_DIR/../update_mermaid.py"
 fi
 
+if [[ ! -f "$VENDOR_DIR/elk.bundled.js" ]]; then
+  echo ">>> vendor/elk.bundled.js not found — running update_elk.py ..."
+  "$PYTHON" "$SCRIPT_DIR/../update_elk.py"
+fi
+
 # ── check / install PyInstaller ───────────────────────────────────────────────
 if ! "$PYTHON" -m PyInstaller --version &>/dev/null; then
   echo ">>> PyInstaller not found — installing ..."
@@ -92,6 +97,7 @@ PYINSTALLER_ARGS=(
   --hidden-import PySide6.QtWebEngineCore
   --hidden-import PySide6.QtWebEngineQuick
   --add-data "../vendor/mermaid.min.js:vendor"
+  --add-data "../vendor/elk.bundled.js:vendor"
   --add-data "../vendor/VERSIONS.json:vendor"
 )
 
