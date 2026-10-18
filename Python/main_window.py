@@ -295,7 +295,9 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest
+from PySide6.QtWebEngineCore import (
+    QWebEngineSettings, QWebEnginePage, QWebEngineDownloadRequest, QWebEngineProfile,
+)
 from PySide6.QtCore import (
     Qt, QTimer, QUrl, QMarginsF, Signal, QSettings, QStandardPaths,
     QFileSystemWatcher, QSize, QEvent,
@@ -1027,6 +1029,8 @@ class EditorTab(QWidget):
         self._newline = "LF"      # "LF" | "CRLF"
         self._font_size = font_size
         self._tmp_html = None     # str | None  (temp file for preview)
+        self._page_ready = False  # True once the shell page has finished loading
+        self._pending_force_puml = False  # manual PlantUML render requested while loading
         self._search_dlg = None   # SearchDialog | None
         self._saving = False      # True while we are writing the file ourselves
         self._disk_stamp = None   # (mtime_ns, size) of the content we last read/wrote
@@ -1082,7 +1086,8 @@ class EditorTab(QWidget):
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
         )
         self.preview.page().featurePermissionRequested.connect(self._grantPermission)
-        self.preview.page().profile().downloadRequested.connect(self._onDownloadRequested)
+        # Connected once here; _onPageLoaded ignores loads other than the shell.
+        self.preview.loadFinished.connect(self._onPageLoaded)
         pl.addWidget(lbl_p)
         pl.addWidget(self.preview)
 
@@ -1183,25 +1188,27 @@ class EditorTab(QWidget):
             self._tmp_html = path
         with open(self._tmp_html, 'w', encoding='utf-8') as f:
             f.write(html)
-        try:
-            self.preview.loadFinished.disconnect(self._onPageLoaded)
-        except Exception:
-            pass
-        self.preview.loadFinished.connect(self._onPageLoaded)
+        self._page_ready = False
         self.preview.load(QUrl.fromLocalFile(self._tmp_html))
 
     def _onPageLoaded(self, ok: bool):
-        try:
-            self.preview.loadFinished.disconnect(self._onPageLoaded)
-        except Exception:
-            pass
+        if self._page_ready:
+            return  # not a shell load we are waiting for
         if ok:
-            self._updatePreview()
+            self._page_ready = True
+            force_puml, self._pending_force_puml = self._pending_force_puml, False
+            self._updatePreview(force_puml=force_puml)
         else:
             # Navigation error — reload the shell and re-render current content
             QTimer.singleShot(0, self.reloadPreview)
 
     def _updatePreview(self, force_puml: bool = False):
+        # Until the shell has loaded, #content and the helper functions do not
+        # exist yet; _onPageLoaded renders the then-current text, so skipping
+        # here loses nothing and avoids a wasted Markdown conversion.
+        if not self._page_ready:
+            self._pending_force_puml |= force_puml
+            return
         body_html = self._mdToHtml(self.editor.toPlainText(), force_puml=force_puml)
         js_string = json.dumps(body_html)
         self.preview.page().runJavaScript(f"""\
@@ -1574,22 +1581,12 @@ if (typeof mermaid !== 'undefined') {{
             self._search_dlg = SearchDialog(self.editor, self.preview, self)
         self._search_dlg.popup()
 
-    # ── permissions / downloads
+    # ── permissions
 
     def _grantPermission(self, url, feature):
         self.preview.page().setFeaturePermission(
             url, feature, QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
         )
-
-    def _onDownloadRequested(self, download: QWebEngineDownloadRequest):
-        suggested = download.suggestedFileName() or "diagram.svg"
-        path, _ = QFileDialog.getSaveFileName(self.window(), "保存", suggested)
-        if path:
-            download.setDownloadDirectory(str(Path(path).parent))
-            download.setDownloadFileName(Path(path).name)
-            download.accept()
-        else:
-            download.cancel()
 
     # ── cleanup
 
@@ -1647,6 +1644,11 @@ class MarkdownEditor(QMainWindow):
         self._initUI()
         self._applyTheme()  # also calls reloadPreview on the first tab
         self.setAcceptDrops(True)
+
+        # All previews share the default profile, so connect once per window —
+        # a per-tab connection opened one save dialog per open tab.
+        QWebEngineProfile.defaultProfile().downloadRequested.connect(
+            self._onDownloadRequested)
 
         if initial_file and Path(initial_file).exists():
             self._loadFileIntoTab(self._curTab(), initial_file)
@@ -2088,6 +2090,9 @@ class MarkdownEditor(QMainWindow):
             return
         tab.cleanup()
         self.tabs.removeTab(idx)
+        # removeTab() only detaches the page; without this the tab — and its
+        # QWebEngineView renderer process (~200 MB) — lives until app exit.
+        tab.deleteLater()
         if self.tabs.count() == 0:
             self._addTab()  # always keep at least one tab; refreshes the list itself
         else:
@@ -2760,6 +2765,18 @@ class MarkdownEditor(QMainWindow):
         self._fontSizeLabel.setText(f"{self._font_size}px")
         for i in range(self.tabs.count()):
             self.tabs.widget(i).applyFontSize(self._font_size)
+
+    # ── Downloads (diagram SVG export from any preview)
+
+    def _onDownloadRequested(self, download: QWebEngineDownloadRequest):
+        suggested = download.suggestedFileName() or "diagram.svg"
+        path, _ = QFileDialog.getSaveFileName(self, "保存", suggested)
+        if path:
+            download.setDownloadDirectory(str(Path(path).parent))
+            download.setDownloadFileName(Path(path).name)
+            download.accept()
+        else:
+            download.cancel()
 
     # ── Window close
 

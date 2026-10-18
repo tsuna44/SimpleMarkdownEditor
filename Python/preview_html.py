@@ -3,8 +3,8 @@ Preview shell HTML generator for Simple Markdown Editor.
 Generates a static page loaded once per theme; content is updated via innerHTML.
 """
 
+import json
 import sys
-from functools import lru_cache
 from pathlib import Path
 
 from pygments.formatters import HtmlFormatter
@@ -17,31 +17,46 @@ def _vendor_dir() -> Path:
     return Path(__file__).parent.parent / "vendor"
 
 
-@lru_cache(maxsize=1)
+def _vendor_script_tag(name: str) -> str | None:
+    """Return a <script src="file://..."> tag for a vendor JS file, or None if missing.
+
+    The file is referenced rather than inlined: inlining kept the whole library
+    as a Python str for the process lifetime (mermaid: ~11 MB, as it contains
+    non-ASCII chars) and rebuilt a ~28 MB shell string plus a ~7 MB temp file
+    on every preview reload.
+    """
+    path = _vendor_dir() / name
+    if path.exists():
+        return f'<script src="{path.resolve().as_uri()}"></script>'
+    return None
+
+
+_MERMAID_CDN = "https://cdn.jsdelivr.net/npm/mermaid@{version}/dist/mermaid.min.js"
+_MERMAID_CDN_DEFAULT_VERSION = "12"  # used only when vendor/VERSIONS.json is unreadable
+
+
+def _mermaid_cdn_version() -> str:
+    """Mermaid version recorded by update_mermaid.py, so the CDN fallback matches vendor."""
+    try:
+        with open(_vendor_dir() / "VERSIONS.json", encoding="utf-8") as f:
+            return json.load(f)["mermaid"]
+    except (OSError, ValueError, KeyError):
+        return _MERMAID_CDN_DEFAULT_VERSION
+
+
 def _mermaid_script_tag() -> str:
     """Return a <script> tag for mermaid.js.
 
     Prefers the local vendor file for offline use.
-    Falls back to the CDN if the vendor file is missing.
-    The result is cached so the 3 MB file is read only once per process.
+    Falls back to the CDN (same version as vendor) if the vendor file is missing.
     """
-    path = _vendor_dir() / "mermaid.min.js"
-    if path.exists():
-        js = path.read_text(encoding="utf-8")
-        return f"<script>{js}</script>"
-    return '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
+    return (_vendor_script_tag("mermaid.min.js")
+            or f'<script src="{_MERMAID_CDN.format(version=_mermaid_cdn_version())}"></script>')
 
 
-@lru_cache(maxsize=1)
 def _elk_script_tag() -> str:
-    """Return a <script> tag for elk.bundled.js, or empty string if unavailable.
-    The result is cached so the 1.6 MB file is read only once per process.
-    """
-    path = _vendor_dir() / "elk.bundled.js"
-    if path.exists():
-        js = path.read_text(encoding="utf-8")
-        return f"<script>{js}</script>"
-    return ""
+    """Return a <script> tag for elk.bundled.js, or empty string if unavailable."""
+    return _vendor_script_tag("elk.bundled.js") or ""
 
 
 # JavaScript function injected into the shell page.
