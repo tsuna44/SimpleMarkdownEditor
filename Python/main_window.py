@@ -247,7 +247,14 @@ def _do_render_plantuml(src: str) -> str:
     the window is unresponsive while the JVM starts and renders. That is why
     the render mode defaults to "manual" on Windows (see MarkdownEditor
     .__init__); an hourglass cursor at least makes the wait explicit.
+
+    The override cursor is Windows-only: on macOS 27.2.1 + Qt 6.11,
+    setOverrideCursor(WaitCursor) crashed inside CoreGraphics
+    (QImage::toCGImage -> CGImageCreate), killing the app at startup when the
+    opened document contained a PlantUML block.
     """
+    if os.name != "nt":
+        return _do_render_plantuml_impl(src)
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
         return _do_render_plantuml_impl(src)
