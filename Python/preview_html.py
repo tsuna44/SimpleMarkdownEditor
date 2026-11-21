@@ -247,10 +247,30 @@ def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
   let _currentFontSize = BASE_FONT_SIZE;
   window._defaultPngScale = {png_default_scale};
 
+  // Mermaid's default font ("trebuchet ms", verdana, arial) has no Japanese
+  // glyphs, so CJK text falls back to an OS-chosen font. On Windows this made
+  // the label size Mermaid measured differ from the rendered text, cutting
+  // labels off. Naming CJK-capable fonts explicitly keeps the two consistent.
+  const _MERMAID_FONT_FAMILY =
+    "'Hiragino Sans', 'Meiryo', 'Yu Gothic', 'Noto Sans CJK JP', sans-serif";
+
   function _initMermaid() {{
-    mermaid.initialize({{ startOnLoad: false, theme: _mermaidTheme }});
+    mermaid.initialize({{
+      startOnLoad: false,
+      theme: _mermaidTheme,
+      fontFamily: _MERMAID_FONT_FAMILY,
+    }});
   }}
   _initMermaid();
+
+  // Let HTML labels overflow their <foreignObject> instead of being clipped,
+  // so any remaining measure/render mismatch never makes text unreadable.
+  // Set as an attribute (not page CSS) so it also survives SVG/PNG export.
+  function unclipLabels(svg) {{
+    svg.querySelectorAll('foreignObject').forEach(fo => {{
+      fo.setAttribute('overflow', 'visible');
+    }});
+  }}
 
   // Scale a rendered mermaid SVG by setting width/height from viewBox × scale factor.
   // This is more reliable than mermaid's fontSize config option.
@@ -351,6 +371,7 @@ def _shell_html(theme: dict, dark: bool, png_default_scale: int = 2) -> str:
     if (!svg) return;  // SVG not ready yet (Mermaid async); MutationObserver will retry
     el.dataset.actions = '1';
     scaleSvg(svg);  // apply current font size scale immediately after render
+    unclipLabels(svg);
     const wrap = document.createElement('div');
     wrap.className = 'diagram-actions';
     const scaleSelect = document.createElement('select');

@@ -147,6 +147,9 @@ python markdown_editor.py [file.md]
 - `vendor/mermaid.min.js` をローカルで読み込みレンダリング（elkjs レイアウトエンジン対応）
 - ライト / ダークテーマに対応
 - フォントサイズ変更時に SVG を viewBox ベースでスケール再計算
+- ラベル文字切れ対策（Windows で長いラベルが切れる問題への対応）
+  - `mermaid.initialize()` の `fontFamily` に日本語対応フォント（Hiragino Sans / Meiryo / Yu Gothic / Noto Sans CJK JP）を指定し、Mermaid のラベル寸法計測と実描画のフォントを一致させる
+  - 描画後、ラベルの `<foreignObject>` に `overflow="visible"` 属性を付与し、寸法がずれても文字をクリップしない（属性で付与するため PNG コピー / SVG 保存にも反映）
 
 **ダイアグラムアクションボタン**（ホバーで表示）:
 
